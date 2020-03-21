@@ -59,8 +59,9 @@ fn server_api_handler(
                         let msg = serde_json::to_string(&faasdata).unwrap();
                         let dno = forward_to(coreserver_ip, msg.as_bytes(), &mut destbuffer, &data);
                         let resp: Value = serde_json::from_slice(&destbuffer[0..dno]).unwrap();
-                        let nextserver_ip =
-                            resp["response"]["node_ip"].as_str().unwrap().to_string();
+                        let alloc_nodes =
+                            resp["response"]["node_ip"].as_array().unwrap();
+                        let nextserver_ip = alloc_nodes[0].as_str().unwrap().to_string();
                         let dno = forward_to(
                             nextserver_ip,
                             serde_json::to_string(&service).unwrap().as_bytes(),
