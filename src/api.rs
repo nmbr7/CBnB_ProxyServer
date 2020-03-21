@@ -31,12 +31,12 @@ fn server_api_handler(
             NodeMsgType::REGISTER => {
                 //TODO map the ip to the ip of the coreserver
                 let mut destbuffer = [0 as u8; 512];
-                let dno = forward_to(coreserver_ip, &buffer[0..no], &mut destbuffer);
+                let dno = forward_to(coreserver_ip, &buffer[0..no], &mut destbuffer, &data);
                 respond_back(stream, &destbuffer[0..dno]);
             }
             NodeMsgType::UPDATE_SYSTAT => {
                 let mut destbuffer = [0 as u8; 512];
-                let dno = forward_to(coreserver_ip, &buffer[0..no], &mut destbuffer);
+                let dno = forward_to(coreserver_ip, &buffer[0..no], &mut destbuffer, &data);
                 respond_back(stream, &destbuffer[0..dno]);
             }
         },
@@ -47,7 +47,7 @@ fn server_api_handler(
                         //println!("{}", service.content);
                         let mut destbuffer = [0 as u8; 512];
 
-                        let data = Message::Service(ServiceMessage {
+                        let faasdata = Message::Service(ServiceMessage {
                             msg_type: ServiceMsgType::SERVICEINIT,
                             service_type: ServiceType::Faas,
                             content: json!({
@@ -56,8 +56,8 @@ fn server_api_handler(
                             .to_string(),
                         });
 
-                        let msg = serde_json::to_string(&data).unwrap();
-                        let dno = forward_to(coreserver_ip, msg.as_bytes(), &mut destbuffer);
+                        let msg = serde_json::to_string(&faasdata).unwrap();
+                        let dno = forward_to(coreserver_ip, msg.as_bytes(), &mut destbuffer, &data);
                         let resp: Value = serde_json::from_slice(&destbuffer[0..dno]).unwrap();
                         let nextserver_ip =
                             resp["response"]["node_ip"].as_str().unwrap().to_string();
@@ -65,6 +65,7 @@ fn server_api_handler(
                             nextserver_ip,
                             serde_json::to_string(&service).unwrap().as_bytes(),
                             &mut destbuffer,
+                            &data,
                         );
                         respond_back(stream, &destbuffer[0..dno]);
                     }
@@ -98,6 +99,7 @@ fn server_api_handler(
                         nextserver_ip,
                         serde_json::to_string(&service).unwrap().as_bytes(),
                         &mut destbuffer,
+                        &data,
                     );
                     respond_back(stream, &destbuffer[0..dno]);
                 }
@@ -109,14 +111,21 @@ fn server_api_handler(
     };
 }
 
-fn forward_to(ip: String, buffer: &[u8], destbuffer: &mut [u8; 512]) -> usize {
+fn forward_to(ip: String, buffer: &[u8], destbuffer: &mut [u8; 512], sip: &String) -> usize {
+    println!("Forwarding connection to IP : {}", &ip);
     let mut deststream = TcpStream::connect(ip).unwrap();
+    
+    deststream.write(sip.as_bytes()).unwrap();
+    deststream.read(destbuffer).unwrap();
+    
     deststream.write_all(&buffer).unwrap();
     deststream.flush().unwrap();
+    
     deststream.read(destbuffer).unwrap()
 }
 
 fn respond_back(mut stream: TcpStream, destbuffer: &[u8]) -> () {
+    println!("Responding back to IP : {}\n", &stream.peer_addr().unwrap().to_string());
     stream.write_all(&destbuffer);
     stream.flush().unwrap();
 }
