@@ -24,8 +24,8 @@ fn server_api_handler(
     let recv_data: Message = serde_json::from_slice(&buffer[0..no]).unwrap();
     //println!("{}", recv_data);
 
-    //let coreserver_ip = String::from("172.28.5.1:7778");
-    let coreserver_ip = String::from("127.0.0.1:7778");
+    let coreserver_ip = String::from("172.28.5.1:7778");
+    //let coreserver_ip = String::from("127.0.0.1:7778");
     match recv_data {
         Message::Node(node) => match node.msg_type {
             NodeMsgType::REGISTER => {
@@ -61,7 +61,7 @@ fn server_api_handler(
                         let resp: Value = serde_json::from_slice(&destbuffer[0..dno]).unwrap();
                         let alloc_nodes =
                             resp["response"]["node_ip"].as_array().unwrap();
-                        let nextserver_ip = alloc_nodes[0].as_str().unwrap().to_string();
+                        let nextserver_ip = format!("{}:7777",alloc_nodes[0].as_str().unwrap().split(":").collect::<Vec<&str>>()[0]);
                         let dno = forward_to(
                             nextserver_ip,
                             serde_json::to_string(&service).unwrap().as_bytes(),
@@ -114,11 +114,12 @@ fn server_api_handler(
 
 fn forward_to(ip: String, buffer: &[u8], destbuffer: &mut [u8; 512], sip: &String) -> usize {
     println!("Forwarding connection to IP : {}", &ip);
-    let mut deststream = TcpStream::connect(ip).unwrap();
-    
-    deststream.write(sip.as_bytes()).unwrap();
-    deststream.read(destbuffer).unwrap();
-    
+    let mut deststream = TcpStream::connect(&ip).unwrap();
+
+    if ip.ends_with("7778"){
+        deststream.write(sip.as_bytes()).unwrap();
+        deststream.read(destbuffer).unwrap();
+    }
     deststream.write_all(&buffer).unwrap();
     deststream.flush().unwrap();
     
