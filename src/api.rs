@@ -113,19 +113,50 @@ fn server_api_handler(
 
                                 // TODO calculate the hash of the file using the filename and the user UUID
                                 let user_file_uuid = Uuid::new_v4().to_string();
-                                let jsondata: String = con.get(&user_file_uuid).unwrap();   
-                                let metadata: Value = serde_json::from_str(&jsondata.as_str()).unwrap();
-                                
-                                // TODO Figure out how to read the json chunk 
-                                //let ip_metadata = metadata["data"].as_array().unwrap();
+                                let jsondata: String = con.get(&user_file_uuid).unwrap();
+                                let jsonmap: HashMap<String, HashMap<String, Vec<String>>> =
+                                    serde_json::from_str(&jsondata.as_str()).unwrap();
 
-                                // Request nodes to fetch the file chunks
+                                let (sct_tx, sct_rx) = mpsc::channel();
+                                for (k, v) in &jsonmap["data"] {
+                                    let nextserver_ip = v[0].clone();
+                                    let metadata: Value =
+                                        serde_json::from_str(v[1].as_str()).unwrap();
 
+                                    let dup_sct_tx = mpsc::Sender::clone(&sct_tx);
 
-                                // TODO
-                                // Combine the encrypted file chunks in correct order and decrypt it using some key
+                                    // TODO Properly define the metadata message to fetch the chunks
+                                    let datamsg = String::from("getchunk");
+
+                                    // Request nodes to fetch the file chunks
+                                    let storage_client_thread = thread::spawn(move || {
+                                        let mut destbuffer = [0 as u8; 512];
+                                        let dno = forward_to(
+                                            nextserver_ip,
+                                            datamsg.as_bytes(),
+                                            &mut destbuffer,
+                                            &String::from(""),
+                                        );
+                                        let chunk =
+                                            str::from_utf8(&destbuffer[0..dno]).unwrap().to_owned();
+                                        dup_sct_tx.send(chunk).unwrap();
+                                    });
+                                }
+
+                                for received in sct_rx.try_recv() {
+                                    match received {
+                                        chunk => {
+                                            // TODO
+                                            // Combine the encrypted file chunks in correct order and decrypt it using some key
+                                        }
+                                        _ => (),
+                                    };
+                                }
+                                // TODO Properly combine data
                                 // Send the file back to the user in json, also accessible from the website
+                                respond_back(stream, String::from("data").as_bytes());
                             }
+
                             "write" => {
                                 // TODO Encrypt the file and split it to chunks of equal size
                                 let mut destbuffer = [0 as u8; 512];
@@ -177,7 +208,9 @@ fn server_api_handler(
                                         );
                                         let metadata: Value =
                                             serde_json::from_slice(&destbuffer[0..dno]).unwrap();
-                                        dup_sct_tx.send((metadata.to_string(),nextserver_ip)).unwrap();
+                                        dup_sct_tx
+                                            .send((metadata.to_string(), nextserver_ip))
+                                            .unwrap();
                                     });
                                 }
 
@@ -185,7 +218,7 @@ fn server_api_handler(
 
                                 for received in sct_rx.try_recv() {
                                     match received {
-                                        (metadata,ip) => {
+                                        (metadata, ip) => {
                                             /*
                                             let dno = forward_to(
                                                 coreserver_ip,
@@ -197,7 +230,7 @@ fn server_api_handler(
                                             // TODO calculate real hash of the chunk
 
                                             let hash = Uuid::new_v4().to_string();
-                                            chunklist.insert(hash, vec!(ip,metadata));
+                                            chunklist.insert(hash, vec![ip, metadata]);
                                         }
                                         _ => (),
                                     };
