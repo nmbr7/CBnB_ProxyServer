@@ -4,10 +4,9 @@ use serde_json::Result;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServiceType {
     // Send to the node
-    //    Vm,
     Storage,
     Faas,
-    //  Docker,
+    Paas
     // CUSTOM,
 }
 
