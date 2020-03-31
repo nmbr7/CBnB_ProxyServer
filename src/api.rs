@@ -1,3 +1,6 @@
+use redis::Commands;
+use serde_json::{json, Result, Value};
+use std::collections::HashMap;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::net::TcpListener;
@@ -5,18 +8,10 @@ use std::net::TcpStream;
 use std::str;
 use std::sync::mpsc;
 use std::thread;
-
 use uuid::Uuid;
-use redis::Commands;
-use serde_json::{json, Result, Value};
 
 use crate::message::{
-    Message,
-    NodeMessage,
-    NodeMsgType,
-    ServiceMessage,
-    ServiceMsgType,
-    ServiceType,
+    Message, NodeMessage, NodeMsgType, ServiceMessage, ServiceMsgType, ServiceType,
 };
 
 fn server_api_handler(
@@ -78,8 +73,8 @@ fn server_api_handler(
                                     .to_string(),
                             );
                         }
-                       // println!("{:?}", node_array);
-                        
+                        // println!("{:?}", node_array);
+
                         // Forward the request to the node server and get the faas uuid and store the ip and the uuid as a vec of tuple
                         for i in node_array {
                             let nextserver_ip = format!("{}:7777", &i);
@@ -89,13 +84,14 @@ fn server_api_handler(
                                 &mut destbuffer,
                                 &data,
                             );
-                            nodedata.push(
-                                vec!(nextserver_ip.to_string(),
-                                str::from_utf8(&destbuffer[0..dno]).unwrap().to_string()))
-                        };
+                            nodedata.push(vec![
+                                nextserver_ip.to_string(),
+                                str::from_utf8(&destbuffer[0..dno]).unwrap().to_string(),
+                            ])
+                        }
 
-                        let ndata = json!({ "data" : nodedata }).to_string();
-                                
+                        let ndata = json!({ "data": nodedata }).to_string();
+
                         let client = redis::Client::open("redis://172.28.5.3/4").unwrap();
                         let mut con = client.get_connection().unwrap();
 
@@ -111,18 +107,113 @@ fn server_api_handler(
                         let msg: Value = serde_json::from_str(&service.content).unwrap();
                         match msg["msg_type"].as_str().unwrap() {
                             "read" => {
-                                // TODO
-                                // Fetch details of the file from the core_server
+                                // TODO Fetch details of the file from the core_server
+                                let client = redis::Client::open("redis://172.28.5.3/7").unwrap();
+                                let mut con = client.get_connection().unwrap();
+
+                                // TODO calculate the hash of the file using the filename and the user UUID
+                                let user_file_uuid = Uuid::new_v4().to_string();
+                                let jsondata: String = con.get(&user_file_uuid).unwrap();   
+                                let metadata: Value = serde_json::from_str(&jsondata.as_str()).unwrap();
+                                
+                                // TODO Figure out how to read the json chunk 
+                                //let ip_metadata = metadata["data"].as_array().unwrap();
+
                                 // Request nodes to fetch the file chunks
+
+
+                                // TODO
                                 // Combine the encrypted file chunks in correct order and decrypt it using some key
                                 // Send the file back to the user in json, also accessible from the website
                             }
                             "write" => {
-                                // TODO
-                                // Encrypt the file and split it to chunks of equal size
+                                // TODO Encrypt the file and split it to chunks of equal size
+                                let mut destbuffer = [0 as u8; 512];
+                                let faasdata = Message::Service(ServiceMessage {
+                                    msg_type: ServiceMsgType::SERVICEINIT,
+                                    service_type: ServiceType::Faas,
+                                    content: json!({
+                                        "request" : "select_node",
+                                    })
+                                    .to_string(),
+                                });
+
+                                let msg = serde_json::to_string(&faasdata).unwrap();
                                 // Fetch list of suitable nodes from the core_server
+                                let dno = forward_to(
+                                    coreserver_ip,
+                                    msg.as_bytes(),
+                                    &mut destbuffer,
+                                    &data,
+                                );
+                                let resp: Value =
+                                    serde_json::from_slice(&destbuffer[0..dno]).unwrap();
+                                let alloc_nodes = resp["response"]["node_ip"].as_array().unwrap();
+
+                                let mut node_array: Vec<String> = Vec::new();
+                                let mut nodedata: Vec<Vec<String>> = Vec::new();
+
+                                // Store the node ips to a
+                                for i in alloc_nodes.iter() {
+                                    node_array.push(
+                                        i.as_str().unwrap().split(":").collect::<Vec<&str>>()[0]
+                                            .to_string(),
+                                    );
+                                }
+                                let (sct_tx, sct_rx) = mpsc::channel();
+                                for i in node_array {
+                                    let dup_sct_tx = mpsc::Sender::clone(&sct_tx);
+                                    let nextserver_ip = format!("{}:7777", &i);
+                                    // TODO put the real data chunk here
+                                    let datachunk = String::from("data");
+
+                                    let storage_client_thread = thread::spawn(move || {
+                                        let mut destbuffer = [0 as u8; 512];
+                                        let dno = forward_to(
+                                            nextserver_ip.clone(),
+                                            datachunk.as_bytes(),
+                                            &mut destbuffer,
+                                            &String::from(""),
+                                        );
+                                        let metadata: Value =
+                                            serde_json::from_slice(&destbuffer[0..dno]).unwrap();
+                                        dup_sct_tx.send((metadata.to_string(),nextserver_ip)).unwrap();
+                                    });
+                                }
+
+                                let mut chunklist: HashMap<String, Vec<String>> = HashMap::new();
+
+                                for received in sct_rx.try_recv() {
+                                    match received {
+                                        (metadata,ip) => {
+                                            /*
+                                            let dno = forward_to(
+                                                coreserver_ip,
+                                                chunk_metadata,
+                                                &mut destbuffer,
+                                                &data,
+                                            );*/
+
+                                            // TODO calculate real hash of the chunk
+
+                                            let hash = Uuid::new_v4().to_string();
+                                            chunklist.insert(hash, vec!(ip,metadata));
+                                        }
+                                        _ => (),
+                                    };
+                                }
+                                let ndata = json!({ "data": chunklist }).to_string();
+                                //let metadata: Value = serde_json::from_str(&chunk_metadata.as_str()).unwrap();
+                                let client = redis::Client::open("redis://172.28.5.3/7").unwrap();
+                                let mut con = client.get_connection().unwrap();
+
+                                // TODO calculate the hash of the file using the filename and the user UUID
+                                let user_file_uuid = Uuid::new_v4().to_string();
+                                let _: () = con.set(&user_file_uuid, ndata).unwrap();
+                                // TODO
                                 // Send the files to the node and send the details of each chunk and it's respective node to the core_server
                                 // Respond back to the user
+                                respond_back(stream, String::from("OK").as_bytes());
                             }
                             _ => {}
                         }
@@ -151,10 +242,8 @@ fn server_api_handler(
                     // TODO Handle requests to multiple redundant faas node for integrity
                     //      Also check if the responses are correct or rather are same
                     for i in ndataarray {
-                        //println!("{:?}",i);
                         let nextserver_ip = &i[0].as_str().unwrap().to_string();
-                        
-                        let msgcontent = ServiceMessage{
+                        let msgcontent = ServiceMessage {
                             msg_type: ServiceMsgType::SERVICEUPDATE,
                             service_type: ServiceType::Faas,
                             content: json!({
@@ -164,8 +253,6 @@ fn server_api_handler(
                             })
                             .to_string(),
                         };
-                        //println!("{:?}",msgcontent);
-
                         dno = forward_to(
                             nextserver_ip.to_string(),
                             serde_json::to_string(&msgcontent).unwrap().as_bytes(),
@@ -175,7 +262,6 @@ fn server_api_handler(
                     }
                     respond_back(stream, &destbuffer[0..dno]);
                 }
-
                 ServiceType::Storage => {}
                 ServiceType::Paas => {}
             },

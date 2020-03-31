@@ -6,8 +6,7 @@ pub enum ServiceType {
     // Send to the node
     Storage,
     Faas,
-    Paas
-    // CUSTOM,
+    Paas, // CUSTOM,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
