@@ -5,6 +5,7 @@ extern crate uuid;
 
 mod api;
 mod message;
+mod services;
 
 use dotenv::dotenv;
 use std::env;
