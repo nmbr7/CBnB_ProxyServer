@@ -14,13 +14,16 @@ use crate::message::{
     Message, NodeMessage, NodeMsgType, ServiceMessage, ServiceMsgType, ServiceType,
 };
 
-use crate::services::{read_storage, write_storage};
+use crate::services::{query_storage, read_storage, write_storage};
+
+static HELLO_WORLD: &str = "proxy_uuid";
 
 fn server_api_handler(
     stream: &mut TcpStream,
     server_dup_tx: mpsc::Sender<String>,
     data: (String),
 ) -> () {
+    let proxy_server_uuid = HELLO_WORLD.to_string();
     println!("Received connection from {}", &data);
 
     let mut buffer = [0; 100_000];
@@ -52,6 +55,7 @@ fn server_api_handler(
                         let mut destbuffer = [0 as u8; 512];
 
                         let faasdata = Message::Service(ServiceMessage {
+                            uuid: proxy_server_uuid,
                             msg_type: ServiceMsgType::SERVICEINIT,
                             service_type: ServiceType::Faas,
                             content: json!({
@@ -111,6 +115,10 @@ fn server_api_handler(
                         println!("{}", msg);
 
                         match msg["msg_type"].as_str().unwrap() {
+                            "query" => {
+                                query_storage(stream, msg);
+                            }
+
                             "read" => {
                                 read_storage(stream, msg);
                             }
@@ -118,6 +126,7 @@ fn server_api_handler(
                             "write" => {
                                 let mut destbuffer = [0 as u8; 512];
                                 let faasdata = Message::Service(ServiceMessage {
+                                    uuid: proxy_server_uuid,
                                     msg_type: ServiceMsgType::SERVICEINIT,
                                     service_type: ServiceType::Faas,
                                     content: json!({
@@ -170,6 +179,7 @@ fn server_api_handler(
                     for i in ndataarray {
                         let nextserver_ip = &i[0].as_str().unwrap().to_string();
                         let msgcontent = ServiceMessage {
+                            uuid: proxy_server_uuid.clone(),
                             msg_type: ServiceMsgType::SERVICEUPDATE,
                             service_type: ServiceType::Faas,
                             content: json!({

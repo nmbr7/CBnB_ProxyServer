@@ -11,27 +11,63 @@ use uuid::Uuid;
 
 use crate::message::{Message, ServiceMessage, ServiceMsgType, ServiceType};
 
-pub fn read_storage(stream: &mut TcpStream, msg: Value) {
+static HELLO_WORLD: &str = "proxy_uuid";
+
+pub fn query_storage(stream: &mut TcpStream, msg: Value) {
+    let proxy_server_uuid = HELLO_WORLD.to_string();
+
     // TODO Fetch details of the file from the core_server
     let client = redis::Client::open("redis://172.28.5.3/7").unwrap();
     let mut con = client.get_connection().unwrap();
 
     // TODO calculate the hash of the file using the filename and the user UUID
-    let user_file_uuid = msg["id"].as_str().unwrap().to_string();
-    let jsondata: String = con.get(&user_file_uuid).unwrap();
-    let jsonmap: HashMap<String, HashMap<String, Vec<String>>> =
-        serde_json::from_str(&jsondata.as_str()).unwrap();
+    let user_uuid = msg["id"].as_str().unwrap().to_string();
+    let query = msg["queryname"].as_str().unwrap();
+    let files: String = con.get(&user_uuid).unwrap();
+    println!("{}", files);
+    let mut filemap: HashMap<String, HashMap<String, Value>> =
+        serde_json::from_str(&files.as_str()).unwrap();
+    match query {
+        "ls" => {
+            for (k, v) in &mut filemap {
+                v.remove("chunk_id");
+            }
+            stream
+                .write_all(json!(filemap).to_string().as_bytes())
+                .unwrap();
+            stream.flush().unwrap();
+        }
+        _ => (),
+    }
+}
+pub fn read_storage(stream: &mut TcpStream, msg: Value) {
+    let proxy_server_uuid = HELLO_WORLD.to_string();
 
-    let (sct_tx, sct_rx) = mpsc::channel();
+    // TODO Fetch details of the file from the core_server
+    let client = redis::Client::open("redis://172.28.5.3/7").unwrap();
+    let mut con = client.get_connection().unwrap();
+
+    // TODO calculate the hash of the file using the filename and the user UUID
+    let user_uuid = msg["id"].as_str().unwrap().to_string();
+    let filename = msg["filename"].as_str().unwrap().to_string();
+    let files: String = con.get(&user_uuid).unwrap();
+    let filemap: HashMap<String, HashMap<String, Value>> =
+        serde_json::from_str(&files.as_str()).unwrap();
     /*
-    let rxthread = thread::spawn(move || {
-        String::from("finished")
-    });
-
+      println!("{:?}",filemap);
+      println!("{}",filemap[&filename]["chunk_id"]);
+      println!("{:?\n}",filename);
     */
+    let filesize = &filemap[&filename]["size"];
+    let chunks: String = con
+        .get(&filemap[&filename]["chunk_id"].as_str().unwrap().to_string())
+        .unwrap();
+    let chunkmap: HashMap<String, Vec<String>> = serde_json::from_str(&chunks.as_str()).unwrap();
+    let (sct_tx, sct_rx) = mpsc::channel();
 
+    //println!("{:?}",chunkmap);
     let mut t_handles: Vec<thread::JoinHandle<_>> = vec![];
-    for (k, v) in &jsonmap["data"] {
+    for (k, v) in &chunkmap {
         let nextserver_ip = v[0].clone();
         let metadata: Value = serde_json::from_str(v[1].as_str()).unwrap();
 
@@ -47,6 +83,7 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
         println!("{}", content);
 
         let data = ServiceMessage {
+            uuid: proxy_server_uuid.clone(),
             msg_type: ServiceMsgType::SERVICEINIT,
             service_type: ServiceType::Storage,
             content: content,
@@ -92,7 +129,7 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
     stream
         .write_all(
             json!({
-                "total_size": 65548,
+                "total_size": filesize,
             })
             .to_string()
             .as_bytes(),
@@ -156,8 +193,11 @@ pub fn write_storage(
     msg: Value,
     resp: Value,
 ) -> std::result::Result<String, ()> {
+    let proxy_server_uuid = HELLO_WORLD.to_string();
     println!("Writing file");
     let filesize = msg["filesize"].as_u64().unwrap();
+    let filename = msg["filename"].as_str().unwrap().to_string();
+    let user_uuid = msg["id"].as_str().unwrap().to_string();
 
     let mut destbuffer = [0 as u8; 512];
     // TODO Encrypt the file and split it to chunks of equal size
@@ -208,10 +248,7 @@ pub fn write_storage(
                 _ => (),
             };
         }
-        json!({
-            "data": chunklist,
-        })
-        .to_string()
+        json!(chunklist).to_string()
     });
 
     let dup_meta_tx = mpsc::Sender::clone(&meta_tx);
@@ -242,6 +279,7 @@ pub fn write_storage(
 
                     let dup2_meta_tx = mpsc::Sender::clone(&dup_meta_tx);
 
+                    let proxy_server_uuid = proxy_server_uuid.clone();
                     let storage_client_thread = thread::spawn(move || {
                         let mut destbuffer = [0 as u8; 512];
 
@@ -252,6 +290,7 @@ pub fn write_storage(
                         .to_string();
 
                         let data = ServiceMessage {
+                            uuid: proxy_server_uuid.clone(),
                             msg_type: ServiceMsgType::SERVICEINIT,
                             service_type: ServiceType::Storage,
                             content: content,
@@ -315,15 +354,54 @@ pub fn write_storage(
         }
     }
 
-    let ndata: String = meta_thread.join().unwrap();
+    let chunkdata: String = meta_thread.join().unwrap();
+    let file_uuid = Uuid::new_v4().to_string();
+
+    // TODO Get uuid from the user message
+
     let client = redis::Client::open("redis://172.28.5.3/7").unwrap();
     let mut con = client.get_connection().unwrap();
 
-    // TODO calculate the hash of the file using the filename and the user UUID
-    let user_file_uuid = Uuid::new_v4().to_string();
-    let _: () = con.set(&user_file_uuid, ndata).unwrap();
+    let filedata: String = match con.get(&user_uuid) {
+        Ok(val) => val,
+        _ => {
+            let _: () = con.set(&user_uuid, json!({}).to_string()).unwrap();
+            json!({}).to_string()
+        }
+    };
+    let mut filemap: Value = serde_json::from_str(&filedata.as_str()).unwrap();
+
+    // Inserting new file
+    filemap[&filename] = json!({
+        "chunk_id"  : file_uuid,
+        "size": filesize,
+        "creation_date": "date",
+    });
+    println!("{:?} - {:?}", file_uuid, chunkdata);
+    let _: () = con.set(&user_uuid, filemap.to_string()).unwrap();
+    let _: () = con.set(&file_uuid, chunkdata).unwrap();
+
     // TODO
-    // Send the files to the node and send the details of each chunk and it's respective node to the core_server
-    // Respond back to the user
-    Ok(user_file_uuid)
+    // send the details of each chunk and it's respective node to the core_server
+    Ok("Upload Complete".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run() {
+        let mut filename = json!({
+            "filename": {
+                "id"  : "file_uuid",
+                "size": "filesize",
+                "creation_date": "date",
+            },});
+        println!("{}", filename);
+        filename["newfile"] = json!({
+            "id": "newid",
+        });
+        println!("{}", filename);
+    }
 }

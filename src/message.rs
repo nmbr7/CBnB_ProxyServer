@@ -21,6 +21,7 @@ pub enum ServiceMsgType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceMessage {
+    pub uuid: String,
     pub msg_type: ServiceMsgType,
     pub service_type: ServiceType,
     pub content: String,
@@ -38,6 +39,7 @@ pub enum NodeMsgType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeMessage {
+    pub uuid: String,
     pub msg_type: NodeMsgType,
     pub content: String, //sys_stat::Resources,
 }
