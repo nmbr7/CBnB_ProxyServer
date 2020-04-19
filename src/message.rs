@@ -33,6 +33,7 @@ pub struct ServiceMessage {
 pub enum NodeMsgType {
     // Received from the node
     REGISTER,
+    PROXY_REGISTRATION,
     UPDATE_SYSTAT,
     // Send to the node
 }

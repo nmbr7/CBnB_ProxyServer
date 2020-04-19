@@ -1,3 +1,5 @@
+use crate::api::{forward_to, respond_back};
+use crate::message::{Message, ServiceMessage, ServiceMsgType, ServiceType};
 use redis::Commands;
 use serde_json::{json, Result, Value};
 use std::collections::HashMap;
@@ -8,8 +10,6 @@ use std::str;
 use std::sync::mpsc;
 use std::thread;
 use uuid::Uuid;
-
-use crate::message::{Message, ServiceMessage, ServiceMsgType, ServiceType};
 
 static HELLO_WORLD: &str = "proxy_uuid";
 
@@ -124,8 +124,6 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
     sct_tx
         .send(((0 as usize, 0 as usize), vec![], "End".to_string()))
         .unwrap();
-
-    // TODO store the total_size in the redis db  (this is a temp hack for a specific file)
     stream
         .write_all(
             json!({
@@ -384,6 +382,83 @@ pub fn write_storage(
     // TODO
     // send the details of each chunk and it's respective node to the core_server
     Ok("Upload Complete".to_string())
+}
+
+// FaaS Related Functions
+
+pub fn faas_client_handler(stream: &mut TcpStream) {
+    let proxy_server_uuid = HELLO_WORLD.to_string();
+    let mut buffer = [0; 55512];
+    let no = stream.read(&mut buffer).unwrap();
+
+    let mut data = std::str::from_utf8(&buffer[0..no]).unwrap();
+    if data.contains("\r\n\r\n") {
+        data = data.split("\r\n\r\n").collect::<Vec<&str>>()[1];
+    } else {
+        stream
+            .write_all(format!("HTTP/1.1 404 Not Found").as_bytes())
+            .unwrap();
+        stream.flush();
+    }
+    let req: Value = serde_json::from_str(data).unwrap();
+
+    let client = redis::Client::open("redis://172.28.5.3/4").unwrap();
+    let mut con = client.get_connection().unwrap();
+
+    let faasjson: String = match con.get(&req["uuid"].as_str().unwrap().to_string()) {
+        Ok(val) => val,
+        _ => {
+            stream
+                .write_all(format!("HTTP/1.1 404 Not Found").as_bytes())
+                .unwrap();
+            stream.flush();
+            return;
+        }
+    };
+    let mut faasmap: Value = serde_json::from_str(&faasjson.as_str()).unwrap();
+    let faas_data: Vec<Value> = faasmap[req["faas_uuid"].as_str().unwrap()]
+        .as_array()
+        .unwrap()
+        .to_vec();
+
+    //TODO Check that the ip address doesn't contain port
+    let mut t_handles: Vec<thread::JoinHandle<_>> = vec![];
+    for faas in faas_data {
+        let proxy_uuid = proxy_server_uuid.clone();
+        let params: Vec<Value> = req["params"].as_array().unwrap().clone();
+        let t_handle = thread::spawn(move || {
+            let faas_msg = json!({
+                "msg_type":"INVOKE",
+                "params":params,
+                "id":faas[1],
+            })
+            .to_string();
+            let data = ServiceMessage {
+                uuid: proxy_uuid.clone(),
+                msg_type: ServiceMsgType::SERVICEINIT,
+                service_type: ServiceType::Faas,
+                content: faas_msg,
+            };
+            let msg = serde_json::to_string(&data).unwrap();
+            let mut destbuffer = [0 as u8; 512];
+            let dno = forward_to(
+                format!("{}:7777", faas[0]),
+                msg.as_bytes(),
+                &mut destbuffer,
+                &String::from(""),
+            );
+            std::str::from_utf8(&destbuffer[0..dno])
+                .unwrap()
+                .to_string()
+        });
+        t_handles.push(t_handle);
+    }
+    let mut resp_data: Vec<String> = vec![];
+    for handle in t_handles {
+        resp_data.push(handle.join().unwrap());
+    }
+    //TODO Check the response and send it to the user
+    respond_back(stream, resp_data[0].as_bytes());
 }
 
 #[cfg(test)]

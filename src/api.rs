@@ -1,3 +1,4 @@
+use log::info;
 use redis::Commands;
 use serde_json::{json, Result, Value};
 use std::collections::HashMap;
@@ -10,11 +11,13 @@ use std::sync::mpsc;
 use std::thread;
 use uuid::Uuid;
 
+use super::mode;
+
 use crate::message::{
     Message, NodeMessage, NodeMsgType, ServiceMessage, ServiceMsgType, ServiceType,
 };
 
-use crate::services::{query_storage, read_storage, write_storage};
+use crate::services::{faas_client_handler, query_storage, read_storage, write_storage};
 
 static HELLO_WORLD: &str = "proxy_uuid";
 
@@ -23,33 +26,52 @@ fn server_api_handler(
     server_dup_tx: mpsc::Sender<String>,
     data: (String),
 ) -> () {
-    let proxy_server_uuid = HELLO_WORLD.to_string();
-    println!("Received connection from {}", &data);
-
-    let mut buffer = [0; 100_000];
-    let no = stream.read(&mut buffer).unwrap();
-    let recv_data: Message = serde_json::from_slice(&buffer[0..no]).unwrap();
-    //println!("{}", recv_data);
-
     //let coreserver_ip = String::from("172.28.5.1:7778");
     let coreserver_ip = String::from("127.0.0.1:7778");
-    match recv_data {
-        Message::Node(node) => match node.msg_type {
-            NodeMsgType::REGISTER => {
-                //TODO map the ip to the ip of the coreserver
-                let mut destbuffer = [0 as u8; 512];
-                let dno = forward_to(coreserver_ip, &buffer[0..no], &mut destbuffer, &data);
-                respond_back(stream, &destbuffer[0..dno]);
+
+    let proxy_server_uuid = HELLO_WORLD.to_string();
+    info!("Received connection from {}", &data);
+
+    if data == coreserver_ip {
+        let mut buffer = [0; 512];
+        let no = stream.read(&mut buffer).unwrap();
+        let resp: Value = serde_json::from_slice(&buffer[0..no]).unwrap();
+        if resp["uuid"].as_str().unwrap() == "coreserver_uuid" {
+            unsafe {
+                mode = resp["mode"].as_u64().unwrap() as u8;
             }
-            NodeMsgType::UPDATE_SYSTAT => {
-                let mut destbuffer = [0 as u8; 512];
-                let dno = forward_to(coreserver_ip, &buffer[0..no], &mut destbuffer, &data);
-                respond_back(stream, &destbuffer[0..dno]);
-            }
-        },
-        Message::Service(service) => match service.msg_type {
-            ServiceMsgType::SERVICEINIT => {
-                match service.service_type {
+        }
+    }
+
+    if unsafe { mode == 1 } {
+        // TODO Define all the client requests
+        //      FaaS function invokation and the paas ssh proxy
+
+        // TODO Check the path and match accordingly
+        faas_client_handler(stream);
+    } else {
+        let mut buffer = [0; 100_000];
+        let no = stream.read(&mut buffer).unwrap();
+        let recv_data: Message = serde_json::from_slice(&buffer[0..no]).unwrap();
+        //println!("{}", recv_data);
+
+        match recv_data {
+            Message::Node(node) => match node.msg_type {
+                NodeMsgType::PROXY_REGISTRATION => {}
+                NodeMsgType::REGISTER => {
+                    //TODO map the ip to the ip of the coreserver
+                    let mut destbuffer = [0 as u8; 512];
+                    let dno = forward_to(coreserver_ip, &buffer[0..no], &mut destbuffer, &data);
+                    respond_back(stream, &destbuffer[0..dno]);
+                }
+                NodeMsgType::UPDATE_SYSTAT => {
+                    let mut destbuffer = [0 as u8; 512];
+                    let dno = forward_to(coreserver_ip, &buffer[0..no], &mut destbuffer, &data);
+                    respond_back(stream, &destbuffer[0..dno]);
+                }
+            },
+            Message::Service(service) => match service.msg_type {
+                ServiceMsgType::SERVICEINIT => match service.service_type {
                     ServiceType::Faas => {
                         //println!("{}", service.content);
                         let mut destbuffer = [0 as u8; 512];
@@ -96,18 +118,27 @@ fn server_api_handler(
                             ])
                         }
 
-                        let ndata = json!({ "data": nodedata }).to_string();
-
                         let client = redis::Client::open("redis://172.28.5.3/4").unwrap();
                         let mut con = client.get_connection().unwrap();
 
-                        let faas_user_uuid = Uuid::new_v4().to_string();
+                        let user_uuid = service.uuid;
+                        let faasdata: String = match con.get(&user_uuid) {
+                            Ok(val) => val,
+                            _ => {
+                                let _: () = con.set(&user_uuid, json!({}).to_string()).unwrap();
+                                json!({}).to_string()
+                            }
+                        };
+                        let mut faasmap: Value = serde_json::from_str(&faasdata.as_str()).unwrap();
 
-                        //println!("{} {:?}",faas_user_uuid,ndata);
+                        // Inserting new faas data
+                        let faas_uuid = Uuid::new_v4().to_string();
 
-                        let _: () = con.set(&faas_user_uuid, ndata).unwrap();
+                        faasmap[&faas_uuid] = json!(nodedata);
 
-                        respond_back(stream, &faas_user_uuid.as_bytes());
+                        let _: () = con.set(&user_uuid, faasmap.to_string()).unwrap();
+
+                        respond_back(stream, &faas_uuid.as_bytes());
                     }
                     ServiceType::Storage => {
                         let msg: Value = serde_json::from_str(&service.content).unwrap();
@@ -154,62 +185,63 @@ fn server_api_handler(
                         }
                     }
                     ServiceType::Paas => {}
-                }
-            }
-            ServiceMsgType::SERVICEUPDATE => match service.service_type {
-                ServiceType::Faas => {
-                    let mut destbuffer = [0 as u8; 512];
-                    let faasdata: Value = serde_json::from_str(&service.content.as_str()).unwrap();
-                    // Get uuid from the user
-                    let faas_uuid = faasdata["id"].as_str().unwrap().to_string();
+                },
+                ServiceMsgType::SERVICEUPDATE => match service.service_type {
+                    ServiceType::Faas => {
+                        let mut destbuffer = [0 as u8; 512];
+                        let faasdata: Value =
+                            serde_json::from_str(&service.content.as_str()).unwrap();
+                        // Get uuid from the user
+                        let faas_uuid = faasdata["id"].as_str().unwrap().to_string();
 
-                    let client = redis::Client::open("redis://172.28.5.3/4").unwrap();
-                    let mut con = client.get_connection().unwrap();
+                        let client = redis::Client::open("redis://172.28.5.3/4").unwrap();
+                        let mut con = client.get_connection().unwrap();
 
-                    // Get the nodedata from the redis store (IP addresses and the faas UUID)
-                    let nodedata: String = con.get(&faas_uuid).unwrap();
+                        // Get the nodedata from the redis store (IP addresses and the faas UUID)
+                        let nodedata: String = con.get(&faas_uuid).unwrap();
 
-                    let ndata: Value = serde_json::from_str(&nodedata.as_str()).unwrap();
-                    let ndataarray = ndata["data"].as_array().unwrap();
-                    // Temp read bytes
-                    let mut dno: usize = 0;
+                        let ndata: Value = serde_json::from_str(&nodedata.as_str()).unwrap();
+                        let ndataarray = ndata["data"].as_array().unwrap();
+                        // Temp read bytes
+                        let mut dno: usize = 0;
 
-                    // TODO Handle requests to multiple redundant faas node for integrity
-                    //      Also check if the responses are correct or rather are same
-                    for i in ndataarray {
-                        let nextserver_ip = &i[0].as_str().unwrap().to_string();
-                        let msgcontent = ServiceMessage {
-                            uuid: proxy_server_uuid.clone(),
-                            msg_type: ServiceMsgType::SERVICEUPDATE,
-                            service_type: ServiceType::Faas,
-                            content: json!({
-                                "msg_type": "MANAGE",
-                                "action"  : "publish",
-                                "id" : i[1].as_str().unwrap().to_string(),
-                            })
-                            .to_string(),
-                        };
-                        dno = forward_to(
-                            nextserver_ip.to_string(),
-                            serde_json::to_string(&msgcontent).unwrap().as_bytes(),
-                            &mut destbuffer,
-                            &data,
-                        );
+                        // TODO Handle requests to multiple redundant faas node for integrity
+                        //      Also check if the responses are correct or rather are same
+                        for i in ndataarray {
+                            let nextserver_ip = &i[0].as_str().unwrap().to_string();
+                            let msgcontent = ServiceMessage {
+                                uuid: proxy_server_uuid.clone(),
+                                msg_type: ServiceMsgType::SERVICEUPDATE,
+                                service_type: ServiceType::Faas,
+                                content: json!({
+                                    "msg_type": "MANAGE",
+                                    "action"  : "publish",
+                                    "id" : i[1].as_str().unwrap().to_string(),
+                                })
+                                .to_string(),
+                            };
+                            dno = forward_to(
+                                nextserver_ip.to_string(),
+                                serde_json::to_string(&msgcontent).unwrap().as_bytes(),
+                                &mut destbuffer,
+                                &data,
+                            );
+                        }
+                        respond_back(stream, &destbuffer[0..dno]);
                     }
-                    respond_back(stream, &destbuffer[0..dno]);
-                }
-                ServiceType::Storage => {}
-                ServiceType::Paas => {}
-            },
+                    ServiceType::Storage => {}
+                    ServiceType::Paas => {}
+                },
 
-            ServiceMsgType::SERVICESTART => {}
-            ServiceMsgType::SERVICESTOP => {}
-        },
-    };
+                ServiceMsgType::SERVICESTART => {}
+                ServiceMsgType::SERVICESTOP => {}
+            },
+        };
+    }
 }
 
-fn forward_to(ip: String, buffer: &[u8], destbuffer: &mut [u8; 512], sip: &String) -> usize {
-    println!("Forwarding connection to IP : {}", &ip);
+pub fn forward_to(ip: String, buffer: &[u8], destbuffer: &mut [u8; 512], sip: &String) -> usize {
+    info!("Forwarding connection to IP : {}", &ip);
     let mut deststream = TcpStream::connect(&ip).unwrap();
 
     if ip.ends_with("7778") {
@@ -222,15 +254,15 @@ fn forward_to(ip: String, buffer: &[u8], destbuffer: &mut [u8; 512], sip: &Strin
     deststream.read(destbuffer).unwrap()
 }
 
-fn respond_back(stream: &mut TcpStream, destbuffer: &[u8]) -> () {
-    println!(
+pub fn respond_back(stream: &mut TcpStream, destbuffer: &[u8]) -> () {
+    info!(
         "Responding back to IP : {}\n",
         &stream.peer_addr().unwrap().to_string()
     );
     stream.write_all(&destbuffer);
     stream.flush().unwrap();
 }
-
+/*
 fn read_and_forward(
     readstream: &mut TcpStream,
     writestream: &mut TcpStream,
@@ -261,10 +293,11 @@ fn read_and_forward(
     }
     Ok("OK".to_string())
 }
+*/
 
 pub fn server_api_main(server_tx: mpsc::Sender<String>) -> () {
     let listener = TcpListener::bind("0.0.0.0:7779").unwrap();
-    println!("Waiting for proxy connections");
+    info!("Waiting for proxy connections");
     for stream in listener.incoming() {
         let mut stream = stream.unwrap();
         let data = (stream.peer_addr().unwrap().to_string());
