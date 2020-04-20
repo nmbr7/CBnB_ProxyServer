@@ -53,11 +53,11 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
     let files: String = con.get(&user_uuid).unwrap();
     let filemap: HashMap<String, HashMap<String, Value>> =
         serde_json::from_str(&files.as_str()).unwrap();
-    /*
+    
       println!("{:?}",filemap);
       println!("{}",filemap[&filename]["chunk_id"]);
       println!("{:?\n}",filename);
-    */
+    
     let filesize = &filemap[&filename]["size"];
     let chunks: String = con
         .get(&filemap[&filename]["chunk_id"].as_str().unwrap().to_string())
@@ -65,7 +65,7 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
     let chunkmap: HashMap<String, Vec<String>> = serde_json::from_str(&chunks.as_str()).unwrap();
     let (sct_tx, sct_rx) = mpsc::channel();
 
-    //println!("{:?}",chunkmap);
+    println!("{:?}",chunkmap);
     let mut t_handles: Vec<thread::JoinHandle<_>> = vec![];
     for (k, v) in &chunkmap {
         let nextserver_ip = v[0].clone();
@@ -335,6 +335,7 @@ pub fn write_storage(
             println!("{:?}", tempbuffer);
         }
         if total % 65536 == 0 {
+            println!("{}",node_array.len());
             let ip = node_array[index % node_array.len()].to_owned();
             sct_tx.send((index, ip, tempbuffer.clone())).unwrap();
             index += 1;
@@ -384,23 +385,247 @@ pub fn write_storage(
     Ok("Upload Complete".to_string())
 }
 
+
+pub fn getfromstore(cstream: &mut TcpStream, data: String, addr: String, path: Vec<&str>,method :String) -> String{
+
+    if path.len()!=3 {
+        cstream.write_all(format!("HTTP/1.1 404 Not Found\r\n\r\n").as_bytes()).unwrap();
+        cstream.flush();
+        return String::from("Error");
+    }
+    let proxy_server_uuid = HELLO_WORLD.to_string();
+    // Currently take only small values \
+    // Since reordering and keeping values in memory is expensive
+    // TODO Handle reordering of large file chunks
+
+    let recv_data: Value = serde_json::from_str(&data).unwrap();
+    let content = json!({
+        "msg_type" :  "read",
+        "filename" :  path[2],
+        "id"       :  recv_data["id"],
+    })
+    .to_string();
+
+    let data = Message::Service(ServiceMessage {
+        msg_type: ServiceMsgType::SERVICEINIT,
+        service_type: ServiceType::Storage,
+        content: content,
+        uuid: proxy_server_uuid,
+    });
+
+    let msg_data = serde_json::to_string(&data).unwrap();
+    //println!("{}",test["content"].as_str().unwrap(());
+
+    let mut resp = [0; 2048];
+    let mut destbuffer = [0 as u8; 2048];
+
+    let mut stream = TcpStream::connect(addr).unwrap();
+    //println!("{:?}", msg_data);
+    stream.write_all(msg_data.as_bytes()).unwrap();
+    stream.flush().unwrap();
+    // TODO Handle the trailing character error
+
+    let no = stream.read(&mut resp).unwrap();
+    let fsize: Value = serde_json::from_slice(&resp[0..no]).unwrap();
+    let filesize = fsize["total_size"].as_u64().unwrap() as usize;
+    if filesize > 1048576{
+        return String::from("OK");
+    }
+    let mut bufvec: Vec<Vec<u8>> = Vec::with_capacity(filesize/65536);
+
+    let mut totalfilesize = 0 as usize;
+    loop {
+        let no = stream.read(&mut resp).unwrap();
+        //println!("val {}",std::str::from_utf8(&resp[0..no]).unwrap());
+        let metadata: Value = serde_json::from_slice(&resp[0..no]).unwrap();
+        //println!("{}",metadata);
+        if metadata["msg_type"].as_str().unwrap() == "End" {break;}
+        let size = metadata["size"].as_u64().unwrap() as usize;
+        let index = metadata["index"].as_u64().unwrap();
+        let mut total = 0 as usize;
+        //let mut bufvec: Vec<u8> = vec![];
+        stream.write_all(String::from("OK").as_bytes()).unwrap();
+        stream.flush().unwrap();
+        loop {
+            let mut dno = stream.read(&mut destbuffer).unwrap();
+            if dno > size {
+                dno = size;
+            }
+            total += dno;
+            bufvec.insert(index as usize,destbuffer[0..dno].to_vec());
+            //println!("Total: {} - dno: {} - Size {}",total,dno,size);
+            if total == size {
+                break;
+            }
+        }
+
+        totalfilesize += total;
+        if totalfilesize > 1048576{
+            return String::from("OK");
+        }
+        let mut yieldcnt = 0;
+        let mut id =0;
+        for i in bufvec.clone(){
+
+            if i.is_empty() && yieldcnt > id{
+                id +=1;
+                continue
+            }
+            else{
+                if (id-yieldcnt > 0) || yieldcnt-id < 0{
+                    break;
+                }
+                if id == 0{
+                    cstream.write_all(format!("HTTP/1.1 200 OK\r\n\r\n").as_bytes()).unwrap();
+                }
+                cstream.write_all(i.as_slice()).unwrap();    
+                cstream.flush();
+                bufvec[id].clear();
+                yieldcnt +=1;
+            }
+            id +=1;
+        }
+        if totalfilesize == filesize {
+            break;
+        }
+
+    }
+       return  String::from("OK");
+}
+
+pub fn uploadtostore(stream: &mut TcpStream, data: String, addr: String) -> String{
+    let proxy_server_uuid = HELLO_WORLD.to_string();
+    let recv_data: Value = serde_json::from_str(&data).unwrap();
+    println!("{:?}",recv_data);
+
+    let map: HashMap<String,String> = serde_json::from_str(json!(recv_data["kv"]).to_string().as_str()).unwrap();
+    
+    let (mut key,mut buf) = (String::new(),String::new()); 
+    for (k,v) in map{
+        key = k;
+        buf = v;
+    }
+    let content = json!({
+        "id"       : recv_data["id"],
+        "msg_type" :  "write",
+        "filename" :  key,
+        "filesize" :  buf.len(),
+    })
+    .to_string();
+    
+
+    let data = Message::Service(ServiceMessage {
+        msg_type: ServiceMsgType::SERVICEINIT,
+        service_type: ServiceType::Storage,
+        content: content,
+        uuid: proxy_server_uuid,
+    });
+    let msg_data = serde_json::to_string(&data).unwrap();
+    //println!("{}",test["content"].as_str().unwrap(());
+
+    let mut resp = [0; 512];
+    let mut stream = TcpStream::connect(addr).unwrap();
+    println!("{:?}", msg_data);
+    stream.write_all(msg_data.as_bytes()).unwrap();
+
+    let no = stream.read(&mut resp).unwrap();
+    if std::str::from_utf8(&resp[0..no]).unwrap() == "OK" {
+        stream.write_all(&buf.as_bytes()).unwrap();
+        println!("Sent");
+    }
+
+    let no = stream.read(&mut resp).unwrap();
+    let mut data = std::str::from_utf8(&resp[0..no]).unwrap();
+    println!("Returned: {}", data);
+    data.to_string()
+}
+
+pub fn kvstore_client_handler(stream: &mut TcpStream, data: String,path : Vec<&str>, method: String){
+    // TODO Fetch the address of the proxy server from the core server
+    let addr = String::from("127.0.0.1:7779");
+    match method.as_str(){
+        "PUT"=> {
+            // TODO Fetch the proxy server address
+            let kvid = uploadtostore(stream, data, addr);
+            let resp = format!("http://cbnb.com/kv/{}",kvid);
+            stream.write_all(format!("HTTP/1.1 200 OK\r\n\r\n{}",resp.trim()).as_bytes()).unwrap();
+            stream.flush();
+        }
+        "GET"=> {
+            getfromstore(stream, data, addr, path, method);
+        }
+        "POST"=> {
+            getfromstore(stream, data, addr, path, method);
+        }
+        "DELETE"=>{
+
+        }
+        _=>(),
+
+    }
+
+}
+
+
+
 // FaaS Related Functions
 
-pub fn faas_client_handler(stream: &mut TcpStream) {
-    let proxy_server_uuid = HELLO_WORLD.to_string();
-    let mut buffer = [0; 55512];
-    let no = stream.read(&mut buffer).unwrap();
-
-    let mut data = std::str::from_utf8(&buffer[0..no]).unwrap();
-    if data.contains("\r\n\r\n") {
-        data = data.split("\r\n\r\n").collect::<Vec<&str>>()[1];
-    } else {
-        stream
-            .write_all(format!("HTTP/1.1 404 Not Found").as_bytes())
-            .unwrap();
-        stream.flush();
+pub mod http {
+    use super::*;
+    pub struct Http{
+        pub method: String,
+        pub path: String,
+        pub header: HashMap<String,String>,
+        pub body: String,
     }
-    let req: Value = serde_json::from_str(data).unwrap();
+
+    impl Http{
+        pub fn parse(stream: &mut TcpStream) -> std::result::Result<Self,String>
+        {
+            let mut method: String=String::new();
+            let mut path: String= String::new();
+            let mut header: HashMap<String,String> = HashMap::new();
+            let mut body: String=String::new();
+
+            let mut buffer = [0; 55512];
+            let no = stream.read(&mut buffer).unwrap();
+            let mut data = std::str::from_utf8(&buffer[0..no]).unwrap();
+            if data.contains("\r\n\r\n") {
+                let temp = data.split("\r\n\r\n").collect::<Vec<&str>>()[0];
+                body = data.split("\r\n\r\n").collect::<Vec<&str>>()[1].to_string();
+                let mut upper = temp.split("\r\n").collect::<Vec<&str>>();
+                let l1 = upper[0].split(" ").collect::<Vec<&str>>();
+                if l1.len() != 3{
+                    return Err(format!("Invalid Request"));
+                }
+                else{
+                    method = l1[0].to_string();
+                    path = l1[1].to_string();
+                }
+                upper.remove(0);
+                for head in upper{
+                    let d = head.split(":").collect::<Vec<&str>>();
+                    header.insert(d[0].to_string(),d[1].to_string());
+                }
+            }
+            else{
+                return Err(format!("Invalid Request"));
+            }
+
+            Ok(Self{
+                method,
+                path,
+                header,
+                body,
+            })
+        }
+    }
+
+}
+pub fn faas_client_handler(stream: &mut TcpStream,data: String) {
+    let proxy_server_uuid = HELLO_WORLD.to_string();
+    
+    let req: Value = serde_json::from_str(data.as_str()).unwrap();
 
     let client = redis::Client::open("redis://172.28.5.3/4").unwrap();
     let mut con = client.get_connection().unwrap();

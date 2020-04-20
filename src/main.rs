@@ -24,7 +24,7 @@ static mut mode: u8 = 0;
 fn main() -> () {
     dotenv().ok();
     env_logger::init();
-
+    println!("\x1B[H\x1B[2J");
     let proxy_server_uuid = env::var("SERVER_UUID")
         .expect("SERVER_UUID not set")
         .as_str()
@@ -40,6 +40,7 @@ fn main() -> () {
         .to_string(),
     });
 
+    //let coreserver_ip = String::from("192.168.43.235:7778");
     let coreserver_ip = String::from("127.0.0.1:7778");
     let msg = serde_json::to_string(&reg_data).unwrap();
     loop {
@@ -49,10 +50,14 @@ fn main() -> () {
             &mut destbuffer,
             &String::from("None").clone(),
         );
+        if dno == 0{
+            return;
+        }
         let resp: Value = serde_json::from_slice(&destbuffer[0..dno]).unwrap();
         if resp["response"] == "OK" {
             unsafe {
                 mode = resp["mode"].as_u64().unwrap() as u8;
+                mode = 0;
             }
             info!("Proxy Server Registration Successfull");
             break;
