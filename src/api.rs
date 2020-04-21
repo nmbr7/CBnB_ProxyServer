@@ -18,7 +18,10 @@ use crate::message::{
 };
 use crate::services::http::Http;
 
-use crate::services::{kvstore_client_handler, faas_client_handler, query_storage, read_storage, write_storage};
+use crate::services::{
+    faas_client_handler, kvstore_client_handler, paas_main, query_storage, read_storage,
+    write_storage,
+};
 
 static HELLO_WORLD: &str = "proxy_uuid";
 
@@ -45,24 +48,34 @@ fn server_api_handler(
         }
     }
     if unsafe { mode == 1 } {
-        let http_content = match Http::parse(stream){
+        let http_content = match Http::parse(stream, 0) {
             Ok(val) => val,
             _ => {
                 info!("[Invalid request]");
-                stream.write_all(format!("HTTP/1.1 404 Not Found").as_bytes()).unwrap();
+                stream
+                    .write_all(format!("HTTP/1.1 404 Not Found").as_bytes())
+                    .unwrap();
                 stream.flush();
                 return;
             }
         };
-        let data = http_content.body;
+        let data = http_content.body.clone();
+        let method = http_content.method.clone();
         let mut path = http_content.path.split("/").collect::<Vec<&str>>();
         path.remove(0);
-        let method = http_content.method;
-        info!("\nMethod: {}\nPath: {:?}\nBody: {}",method,path,data);
+        info!("\nMethod: {}\nPath: {:?}\nBody: {}", method, path, data);
         // http routing
-        match path[0]{
-            "invoke" => faas_client_handler(stream, data),
-            "kv" => kvstore_client_handler(stream, data, path, method),
+        match path[0] {
+            "invoke" => {
+                Http::parse(stream, 0).unwrap();
+                faas_client_handler(stream, data);
+            }
+            "kv" => {
+                Http::parse(stream, 0).unwrap();
+                kvstore_client_handler(stream, data, path, method);
+            }
+
+            "apps" => paas_main(stream, &http_content),
             _ => (),
         }
     } else {
@@ -261,31 +274,30 @@ pub fn forward_to(ip: String, buffer: &[u8], destbuffer: &mut [u8; 512], sip: &S
     info!("Forwarding connection to [{}]", &ip);
     let mut cnt = 0;
     loop {
-        let mut deststream = match TcpStream::connect(&ip){
+        let mut deststream = match TcpStream::connect(&ip) {
             Ok(val) => val,
-            _=>{
-                if cnt != 5{
+            _ => {
+                if cnt != 5 {
                     let sec = time::Duration::from_secs(2);
                     thread::sleep(sec);
                     info!("Retrying");
                     cnt += 1;
                     continue;
-                }
-                else{
+                } else {
                     info!("Drop connection attempt");
                     // TODO Handler all the return at the caller properly
                     return 0;
                 }
             }
         };
-    if ip.ends_with("7778") {
-        deststream.write(sip.as_bytes()).unwrap();
-        deststream.read(destbuffer).unwrap();
-    }
-    deststream.write_all(&buffer).unwrap();
-    deststream.flush().unwrap();
+        if ip.ends_with("7778") {
+            deststream.write(sip.as_bytes()).unwrap();
+            deststream.read(destbuffer).unwrap();
+        }
+        deststream.write_all(&buffer).unwrap();
+        deststream.flush().unwrap();
 
-    return deststream.read(destbuffer).unwrap();
+        return deststream.read(destbuffer).unwrap();
     }
 }
 

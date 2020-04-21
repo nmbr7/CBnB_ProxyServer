@@ -50,14 +50,13 @@ fn main() -> () {
             &mut destbuffer,
             &String::from("None").clone(),
         );
-        if dno == 0{
+        if dno == 0 {
             return;
         }
         let resp: Value = serde_json::from_slice(&destbuffer[0..dno]).unwrap();
         if resp["response"] == "OK" {
             unsafe {
                 mode = resp["mode"].as_u64().unwrap() as u8;
-                mode = 0;
             }
             info!("Proxy Server Registration Successfull");
             break;

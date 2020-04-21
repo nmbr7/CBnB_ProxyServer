@@ -11,6 +11,15 @@ use std::sync::mpsc;
 use std::thread;
 use uuid::Uuid;
 
+// Async related
+use futures::future::try_join;
+use futures::FutureExt;
+use std::env;
+use std::error::Error;
+use tokio::io as tio;
+use tokio::net::TcpStream as tokstream;
+use tokio::prelude::*;
+
 static HELLO_WORLD: &str = "proxy_uuid";
 
 pub fn query_storage(stream: &mut TcpStream, msg: Value) {
@@ -53,11 +62,11 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
     let files: String = con.get(&user_uuid).unwrap();
     let filemap: HashMap<String, HashMap<String, Value>> =
         serde_json::from_str(&files.as_str()).unwrap();
-    
-      println!("{:?}",filemap);
-      println!("{}",filemap[&filename]["chunk_id"]);
-      println!("{:?\n}",filename);
-    
+
+    println!("{:?}", filemap);
+    println!("{}", filemap[&filename]["chunk_id"]);
+    println!("{:?\n}", filename);
+
     let filesize = &filemap[&filename]["size"];
     let chunks: String = con
         .get(&filemap[&filename]["chunk_id"].as_str().unwrap().to_string())
@@ -65,7 +74,7 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
     let chunkmap: HashMap<String, Vec<String>> = serde_json::from_str(&chunks.as_str()).unwrap();
     let (sct_tx, sct_rx) = mpsc::channel();
 
-    println!("{:?}",chunkmap);
+    println!("{:?}", chunkmap);
     let mut t_handles: Vec<thread::JoinHandle<_>> = vec![];
     for (k, v) in &chunkmap {
         let nextserver_ip = v[0].clone();
@@ -335,7 +344,7 @@ pub fn write_storage(
             println!("{:?}", tempbuffer);
         }
         if total % 65536 == 0 {
-            println!("{}",node_array.len());
+            println!("{}", node_array.len());
             let ip = node_array[index % node_array.len()].to_owned();
             sct_tx.send((index, ip, tempbuffer.clone())).unwrap();
             index += 1;
@@ -385,11 +394,17 @@ pub fn write_storage(
     Ok("Upload Complete".to_string())
 }
 
-
-pub fn getfromstore(cstream: &mut TcpStream, data: String, addr: String, path: Vec<&str>,method :String) -> String{
-
-    if path.len()!=3 {
-        cstream.write_all(format!("HTTP/1.1 404 Not Found\r\n\r\n").as_bytes()).unwrap();
+pub fn getfromstore(
+    cstream: &mut TcpStream,
+    data: String,
+    addr: String,
+    path: Vec<&str>,
+    method: String,
+) -> String {
+    if path.len() != 3 {
+        cstream
+            .write_all(format!("HTTP/1.1 404 Not Found\r\n\r\n").as_bytes())
+            .unwrap();
         cstream.flush();
         return String::from("Error");
     }
@@ -428,10 +443,10 @@ pub fn getfromstore(cstream: &mut TcpStream, data: String, addr: String, path: V
     let no = stream.read(&mut resp).unwrap();
     let fsize: Value = serde_json::from_slice(&resp[0..no]).unwrap();
     let filesize = fsize["total_size"].as_u64().unwrap() as usize;
-    if filesize > 1048576{
+    if filesize > 1048576 {
         return String::from("OK");
     }
-    let mut bufvec: Vec<Vec<u8>> = Vec::with_capacity(filesize/65536);
+    let mut bufvec: Vec<Vec<u8>> = Vec::with_capacity(filesize / 65536);
 
     let mut totalfilesize = 0 as usize;
     loop {
@@ -439,7 +454,9 @@ pub fn getfromstore(cstream: &mut TcpStream, data: String, addr: String, path: V
         //println!("val {}",std::str::from_utf8(&resp[0..no]).unwrap());
         let metadata: Value = serde_json::from_slice(&resp[0..no]).unwrap();
         //println!("{}",metadata);
-        if metadata["msg_type"].as_str().unwrap() == "End" {break;}
+        if metadata["msg_type"].as_str().unwrap() == "End" {
+            break;
+        }
         let size = metadata["size"].as_u64().unwrap() as usize;
         let index = metadata["index"].as_u64().unwrap();
         let mut total = 0 as usize;
@@ -452,7 +469,7 @@ pub fn getfromstore(cstream: &mut TcpStream, data: String, addr: String, path: V
                 dno = size;
             }
             total += dno;
-            bufvec.insert(index as usize,destbuffer[0..dno].to_vec());
+            bufvec.insert(index as usize, destbuffer[0..dno].to_vec());
             //println!("Total: {} - dno: {} - Size {}",total,dno,size);
             if total == size {
                 break;
@@ -460,48 +477,48 @@ pub fn getfromstore(cstream: &mut TcpStream, data: String, addr: String, path: V
         }
 
         totalfilesize += total;
-        if totalfilesize > 1048576{
+        if totalfilesize > 1048576 {
             return String::from("OK");
         }
         let mut yieldcnt = 0;
-        let mut id =0;
-        for i in bufvec.clone(){
-
-            if i.is_empty() && yieldcnt > id{
-                id +=1;
-                continue
-            }
-            else{
-                if (id-yieldcnt > 0) || yieldcnt-id < 0{
+        let mut id = 0;
+        for i in bufvec.clone() {
+            if i.is_empty() && yieldcnt > id {
+                id += 1;
+                continue;
+            } else {
+                if (id - yieldcnt > 0) || yieldcnt - id < 0 {
                     break;
                 }
-                if id == 0{
-                    cstream.write_all(format!("HTTP/1.1 200 OK\r\n\r\n").as_bytes()).unwrap();
+                if id == 0 {
+                    cstream
+                        .write_all(format!("HTTP/1.1 200 OK\r\n\r\n").as_bytes())
+                        .unwrap();
                 }
-                cstream.write_all(i.as_slice()).unwrap();    
+                cstream.write_all(i.as_slice()).unwrap();
                 cstream.flush();
                 bufvec[id].clear();
-                yieldcnt +=1;
+                yieldcnt += 1;
             }
-            id +=1;
+            id += 1;
         }
         if totalfilesize == filesize {
             break;
         }
-
     }
-       return  String::from("OK");
+    return String::from("OK");
 }
 
-pub fn uploadtostore(stream: &mut TcpStream, data: String, addr: String) -> String{
+pub fn uploadtostore(stream: &mut TcpStream, data: String, addr: String) -> String {
     let proxy_server_uuid = HELLO_WORLD.to_string();
     let recv_data: Value = serde_json::from_str(&data).unwrap();
-    println!("{:?}",recv_data);
+    println!("{:?}", recv_data);
 
-    let map: HashMap<String,String> = serde_json::from_str(json!(recv_data["kv"]).to_string().as_str()).unwrap();
-    
-    let (mut key,mut buf) = (String::new(),String::new()); 
-    for (k,v) in map{
+    let map: HashMap<String, String> =
+        serde_json::from_str(json!(recv_data["kv"]).to_string().as_str()).unwrap();
+
+    let (mut key, mut buf) = (String::new(), String::new());
+    for (k, v) in map {
         key = k;
         buf = v;
     }
@@ -512,7 +529,6 @@ pub fn uploadtostore(stream: &mut TcpStream, data: String, addr: String) -> Stri
         "filesize" :  buf.len(),
     })
     .to_string();
-    
 
     let data = Message::Service(ServiceMessage {
         msg_type: ServiceMsgType::SERVICEINIT,
@@ -540,79 +556,110 @@ pub fn uploadtostore(stream: &mut TcpStream, data: String, addr: String) -> Stri
     data.to_string()
 }
 
-pub fn kvstore_client_handler(stream: &mut TcpStream, data: String,path : Vec<&str>, method: String){
-    // TODO Fetch the address of the proxy server from the core server
-    let addr = String::from("127.0.0.1:7779");
-    match method.as_str(){
-        "PUT"=> {
-            // TODO Fetch the proxy server address
-            let kvid = uploadtostore(stream, data, addr);
-            let resp = format!("http://cbnb.com/kv/{}",kvid);
-            stream.write_all(format!("HTTP/1.1 200 OK\r\n\r\n{}",resp.trim()).as_bytes()).unwrap();
-            stream.flush();
-        }
-        "GET"=> {
-            getfromstore(stream, data, addr, path, method);
-        }
-        "POST"=> {
-            getfromstore(stream, data, addr, path, method);
-        }
-        "DELETE"=>{
+#[tokio::main]
+pub async fn paas_main(stream: &mut TcpStream, http_data: &http::Http) {
+    let mut path = http_data.path.split("/").collect::<Vec<&str>>();
+    path.remove(0);
+    let app_uuid = path[1];
+    // TODO Lookup the node related to the app_uuid from the proxy server or from the cache;
 
-        }
-        _=>(),
-
-    }
-
+    let server_addr = String::from("127.0.0.1:9090");
+    let inbound = tokstream::from_std(stream.try_clone().unwrap()).unwrap();
+    println!("Got Connection");
+    tokio::join!(transfer(inbound, server_addr.clone()));
 }
 
+async fn transfer(mut inbound: tokstream, proxy_addr: String) {
+    let mut b1 = [0; 512];
+    //let n = inbound.read(&mut b1).await.unwrap();
+    //println!("{:?}",std::str::from_utf8(&b1[0..n]).unwrap());
+    println!("Proxying to: {}", proxy_addr);
+    let mut outbound = tokstream::connect(proxy_addr).await.unwrap();
 
+    let (mut ri, mut wi) = inbound.split();
+    let (mut ro, mut wo) = outbound.split();
+
+    let client_to_server = tio::copy(&mut ri, &mut wo);
+    let server_to_client = tio::copy(&mut ro, &mut wi);
+
+    try_join(client_to_server, server_to_client).await.unwrap();
+}
+
+pub fn kvstore_client_handler(
+    stream: &mut TcpStream,
+    data: String,
+    path: Vec<&str>,
+    method: String,
+) {
+    // TODO Fetch the address of the proxy server from the core server
+    let addr = String::from("127.0.0.1:7779");
+    match method.as_str() {
+        "PUT" => {
+            // TODO Fetch the proxy server address
+            let kvid = uploadtostore(stream, data, addr);
+            let resp = format!("http://cbnb.com/kv/{}", kvid);
+            stream
+                .write_all(format!("HTTP/1.1 200 OK\r\n\r\n{}", resp.trim()).as_bytes())
+                .unwrap();
+            stream.flush();
+        }
+        "GET" => {
+            getfromstore(stream, data, addr, path, method);
+        }
+        "POST" => {
+            getfromstore(stream, data, addr, path, method);
+        }
+        "DELETE" => {}
+        _ => (),
+    }
+}
 
 // FaaS Related Functions
 
 pub mod http {
     use super::*;
-    pub struct Http{
+    pub struct Http {
         pub method: String,
         pub path: String,
-        pub header: HashMap<String,String>,
+        pub header: HashMap<String, String>,
         pub body: String,
     }
 
-    impl Http{
-        pub fn parse(stream: &mut TcpStream) -> std::result::Result<Self,String>
-        {
-            let mut method: String=String::new();
-            let mut path: String= String::new();
-            let mut header: HashMap<String,String> = HashMap::new();
-            let mut body: String=String::new();
+    impl Http {
+        pub fn parse(stream: &mut TcpStream, read_mode: u8) -> std::result::Result<Self, String> {
+            let mut method: String = String::new();
+            let mut path: String = String::new();
+            let mut header: HashMap<String, String> = HashMap::new();
+            let mut body: String = String::new();
 
             let mut buffer = [0; 55512];
-            let no = stream.read(&mut buffer).unwrap();
+            let no = if read_mode == 0 {
+                stream.peek(&mut buffer).unwrap()
+            } else {
+                stream.read(&mut buffer).unwrap()
+            };
             let mut data = std::str::from_utf8(&buffer[0..no]).unwrap();
             if data.contains("\r\n\r\n") {
                 let temp = data.split("\r\n\r\n").collect::<Vec<&str>>()[0];
                 body = data.split("\r\n\r\n").collect::<Vec<&str>>()[1].to_string();
                 let mut upper = temp.split("\r\n").collect::<Vec<&str>>();
                 let l1 = upper[0].split(" ").collect::<Vec<&str>>();
-                if l1.len() != 3{
+                if l1.len() != 3 {
                     return Err(format!("Invalid Request"));
-                }
-                else{
+                } else {
                     method = l1[0].to_string();
                     path = l1[1].to_string();
                 }
                 upper.remove(0);
-                for head in upper{
+                for head in upper {
                     let d = head.split(":").collect::<Vec<&str>>();
-                    header.insert(d[0].to_string(),d[1].to_string());
+                    header.insert(d[0].to_string(), d[1].to_string());
                 }
-            }
-            else{
+            } else {
                 return Err(format!("Invalid Request"));
             }
 
-            Ok(Self{
+            Ok(Self {
                 method,
                 path,
                 header,
@@ -620,11 +667,10 @@ pub mod http {
             })
         }
     }
-
 }
-pub fn faas_client_handler(stream: &mut TcpStream,data: String) {
+pub fn faas_client_handler(stream: &mut TcpStream, data: String) {
     let proxy_server_uuid = HELLO_WORLD.to_string();
-    
+
     let req: Value = serde_json::from_str(data.as_str()).unwrap();
 
     let client = redis::Client::open("redis://172.28.5.3/4").unwrap();
