@@ -4,6 +4,9 @@ name = "proxy_server"
 version = "0.1.0"
 authors = ["nmbr7 <suhailr7@ymail.com>"]
 edition = "2018"
+[profile.release]
+debug = true
+
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

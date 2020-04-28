@@ -401,7 +401,7 @@ pub fn getfromstore(
     path: Vec<&str>,
     method: String,
 ) -> String {
-    if path.len() != 3 {
+    if path.len() != 1 {
         cstream
             .write_all(format!("HTTP/1.1 404 Not Found\r\n\r\n").as_bytes())
             .unwrap();
@@ -416,7 +416,7 @@ pub fn getfromstore(
     let recv_data: Value = serde_json::from_str(&data).unwrap();
     let content = json!({
         "msg_type" :  "read",
-        "filename" :  path[2],
+        "filename" :  path[0],
         "id"       :  recv_data["id"],
     })
     .to_string();
@@ -553,17 +553,17 @@ pub fn uploadtostore(stream: &mut TcpStream, data: String, addr: String) -> Stri
     let no = stream.read(&mut resp).unwrap();
     let mut data = std::str::from_utf8(&resp[0..no]).unwrap();
     println!("Returned: {}", data);
-    data.to_string()
+    key.to_string()
 }
 
 #[tokio::main]
 pub async fn paas_main(stream: &mut TcpStream, http_data: &http::Http) {
     let mut path = http_data.path.split("/").collect::<Vec<&str>>();
     path.remove(0);
-    let app_uuid = path[1];
+    //let app_uuid = path[1];
     // TODO Lookup the node related to the app_uuid from the proxy server or from the cache;
 
-    let server_addr = String::from("127.0.0.1:9090");
+    let server_addr = String::from("127.0.0.1:8080");
     let inbound = tokstream::from_std(stream.try_clone().unwrap()).unwrap();
     println!("Got Connection");
     tokio::join!(transfer(inbound, server_addr.clone()));
@@ -571,10 +571,14 @@ pub async fn paas_main(stream: &mut TcpStream, http_data: &http::Http) {
 
 async fn transfer(mut inbound: tokstream, proxy_addr: String) {
     let mut b1 = [0; 512];
-    //let n = inbound.read(&mut b1).await.unwrap();
     //println!("{:?}",std::str::from_utf8(&b1[0..n]).unwrap());
-    println!("Proxying to: {}", proxy_addr);
+    println!("Relaying to app: {}", proxy_addr);
     let mut outbound = tokstream::connect(proxy_addr).await.unwrap();
+    outbound
+        .write(json!({"msg_type":"invoke"}).to_string().as_bytes())
+        .await
+        .unwrap();
+    outbound.read(&mut b1).await.unwrap();
 
     let (mut ri, mut wi) = inbound.split();
     let (mut ro, mut wo) = outbound.split();
@@ -597,7 +601,7 @@ pub fn kvstore_client_handler(
         "PUT" => {
             // TODO Fetch the proxy server address
             let kvid = uploadtostore(stream, data, addr);
-            let resp = format!("http://cbnb.com/kv/{}", kvid);
+            let resp = format!("http://cbnb.com/{}", kvid);
             stream
                 .write_all(format!("HTTP/1.1 200 OK\r\n\r\n{}", resp.trim()).as_bytes())
                 .unwrap();
@@ -639,6 +643,7 @@ pub mod http {
                 stream.read(&mut buffer).unwrap()
             };
             let mut data = std::str::from_utf8(&buffer[0..no]).unwrap();
+
             if data.contains("\r\n\r\n") {
                 let temp = data.split("\r\n\r\n").collect::<Vec<&str>>()[0];
                 body = data.split("\r\n\r\n").collect::<Vec<&str>>()[1].to_string();
@@ -653,7 +658,7 @@ pub mod http {
                 upper.remove(0);
                 for head in upper {
                     let d = head.split(":").collect::<Vec<&str>>();
-                    header.insert(d[0].to_string(), d[1].to_string());
+                    header.insert(d[0].to_string(), d[1].trim().to_string());
                 }
             } else {
                 return Err(format!("Invalid Request"));
@@ -671,7 +676,16 @@ pub mod http {
 pub fn faas_client_handler(stream: &mut TcpStream, data: String) {
     let proxy_server_uuid = HELLO_WORLD.to_string();
 
-    let req: Value = serde_json::from_str(data.as_str()).unwrap();
+    let req: Value = match serde_json::from_str(data.as_str()){
+        Ok(val) => val,
+        _ => {
+            stream
+                .write_all(format!("HTTP/1.1 404 Not Found\r\n\r\n").as_bytes())
+                .unwrap();
+            stream.flush();
+            return;
+        }
+    };
 
     let client = redis::Client::open("redis://172.28.5.3/4").unwrap();
     let mut con = client.get_connection().unwrap();
@@ -680,12 +694,13 @@ pub fn faas_client_handler(stream: &mut TcpStream, data: String) {
         Ok(val) => val,
         _ => {
             stream
-                .write_all(format!("HTTP/1.1 404 Not Found").as_bytes())
+                .write_all(format!("HTTP/1.1 404 Not Found\r\n\r\n").as_bytes())
                 .unwrap();
             stream.flush();
             return;
         }
     };
+    println!("{:?}",faasjson);
     let mut faasmap: Value = serde_json::from_str(&faasjson.as_str()).unwrap();
     let faas_data: Vec<Value> = faasmap[req["faas_uuid"].as_str().unwrap()]
         .as_array()

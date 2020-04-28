@@ -1,6 +1,6 @@
 use log::info;
 use redis::Commands;
-use serde_json::{json, Result, Value};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::prelude::*;
 use std::io::BufReader;
@@ -51,9 +51,9 @@ fn server_api_handler(
         let http_content = match Http::parse(stream, 0) {
             Ok(val) => val,
             _ => {
-                info!("[Invalid request]");
+                info!("[invalid request]");
                 stream
-                    .write_all(format!("HTTP/1.1 404 Not Found").as_bytes())
+                    .write_all(format!("HTTP/1.1 404 Not Found\r\n\r\n").as_bytes())
                     .unwrap();
                 stream.flush();
                 return;
@@ -61,22 +61,38 @@ fn server_api_handler(
         };
         let data = http_content.body.clone();
         let method = http_content.method.clone();
+        let host = http_content.header["Host"].clone();
         let mut path = http_content.path.split("/").collect::<Vec<&str>>();
         path.remove(0);
-        info!("\nMethod: {}\nPath: {:?}\nBody: {}", method, path, data);
-        // http routing
-        match path[0] {
-            "invoke" => {
-                Http::parse(stream, 0).unwrap();
-                faas_client_handler(stream, data);
-            }
-            "kv" => {
+        info!(
+            "\nMethod: {}\nHost: {}\nPath: {:?}\nBody: {}",
+            method, host, path, data
+        );
+        // http routing based on the host name
+        match host.as_str() {
+            "faas.cbnb.com" => match path[0] {
+                "invoke" => {
+                    // Check the id here itself and respond accordingly
+                    Http::parse(stream, 0).unwrap();
+                    faas_client_handler(stream, data);
+                }
+                _ => {}
+            },
+            "kv.cbnb.com" => {
                 Http::parse(stream, 0).unwrap();
                 kvstore_client_handler(stream, data, path, method);
+            },
+            "paas.cbnb.com" => {
+                paas_main(stream, &http_content);
             }
-
-            "apps" => paas_main(stream, &http_content),
-            _ => (),
+            _ => {
+                info!("[invalid request]");
+                stream
+                    .write_all(format!("HTTP/1.1 404 Not Found\r\n\r\n").as_bytes())
+                    .unwrap();
+                stream.flush();
+                return;
+            }
         }
     } else {
         let mut buffer = [0; 100_000];
@@ -213,7 +229,71 @@ fn server_api_handler(
                             _ => {}
                         }
                     }
-                    ServiceType::Paas => {}
+                    ServiceType::Paas => {
+                        let msg: Value = serde_json::from_str(&service.content).unwrap();
+                        match msg["msg_type"].as_str().unwrap() {
+                            "deploy" => {
+                                // Fetch list of suitable nodes from the core_server
+                                let mut destbuffer = [0 as u8; 512];
+
+                                let paasnode = Message::Service(ServiceMessage {
+                                    uuid: proxy_server_uuid.clone(),
+                                    msg_type: ServiceMsgType::SERVICEINIT,
+                                    service_type: ServiceType::Paas,
+                                    content: json!({
+                                        "request" : "select_node",
+                                    })
+                                    .to_string(),
+                                });
+
+                                let msg = serde_json::to_string(&paasnode).unwrap();
+                                let dno = forward_to(
+                                    coreserver_ip,
+                                    msg.as_bytes(),
+                                    &mut destbuffer,
+                                    &data,
+                                );
+                                let resp: Value =
+                                    serde_json::from_slice(&destbuffer[0..dno]).unwrap();
+                                let alloc_nodes = resp["response"]["node_ip"].as_array().unwrap();
+
+                                let mut node_array: Vec<String> = Vec::new();
+                                let mut nodedata: Vec<Vec<String>> = Vec::new();
+
+                                // Store the node ips to a
+                                for i in alloc_nodes.iter() {
+                                    node_array.push(
+                                        i.as_str().unwrap().split(":").collect::<Vec<&str>>()[0]
+                                            .to_string(),
+                                    );
+                                }
+                                let paasdata = Message::Service(ServiceMessage {
+                                    uuid: proxy_server_uuid.clone(),
+                                    msg_type: ServiceMsgType::SERVICEINIT,
+                                    service_type: ServiceType::Paas,
+                                    content: service.content,
+                                });
+
+                                let node_msg = serde_json::to_string(&paasdata).unwrap();
+
+                                for i in node_array {
+                                    let nextserver_ip = format!("{}:7777", &i);
+                                    let dno = forward_to(
+                                        nextserver_ip.clone(),
+                                        node_msg.as_bytes(),
+                                        &mut destbuffer,
+                                        &data,
+                                    );
+                                    nodedata.push(vec![
+                                        nextserver_ip.to_string(),
+                                        str::from_utf8(&destbuffer[0..dno]).unwrap().to_string(),
+                                    ])
+                                }
+                                //Handle saving of details to the cache and db
+                            }
+                            _ => {}
+                        }
+                    }
                 },
                 ServiceMsgType::SERVICEUPDATE => match service.service_type {
                     ServiceType::Faas => {
