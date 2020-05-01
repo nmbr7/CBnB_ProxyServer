@@ -17,4 +17,5 @@ redis = "*"
 log = "*"
 tokio = { version = "0.2", features = ["full"] }
 futures = "*"
+chrono = "*"
 env_logger = "*"

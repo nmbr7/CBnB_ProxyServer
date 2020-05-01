@@ -1,4 +1,4 @@
-use crate::api::{forward_to, respond_back};
+use crate::api::{try_connect, forward_to, respond_back};
 use crate::message::{Message, ServiceMessage, ServiceMsgType, ServiceType};
 use redis::Commands;
 use serde_json::{json, Result, Value};
@@ -10,6 +10,7 @@ use std::str;
 use std::sync::mpsc;
 use std::thread;
 use uuid::Uuid;
+use log::{info,debug};
 
 // Async related
 use futures::future::try_join;
@@ -33,7 +34,7 @@ pub fn query_storage(stream: &mut TcpStream, msg: Value) {
     let user_uuid = msg["id"].as_str().unwrap().to_string();
     let query = msg["queryname"].as_str().unwrap();
     let files: String = con.get(&user_uuid).unwrap();
-    println!("{}", files);
+    debug!("{}", files);
     let mut filemap: HashMap<String, HashMap<String, Value>> =
         serde_json::from_str(&files.as_str()).unwrap();
     match query {
@@ -63,9 +64,11 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
     let filemap: HashMap<String, HashMap<String, Value>> =
         serde_json::from_str(&files.as_str()).unwrap();
 
-    println!("{:?}", filemap);
-    println!("{}", filemap[&filename]["chunk_id"]);
-    println!("{:?\n}", filename);
+    debug!("\n********************************************************");
+    debug!("{:?}", filemap);
+    debug!("{:?\n}", filename);
+    debug!("{}", filemap[&filename]["chunk_id"]);
+    debug!("\n********************************************************");
 
     let filesize = &filemap[&filename]["size"];
     let chunks: String = con
@@ -74,7 +77,7 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
     let chunkmap: HashMap<String, Vec<String>> = serde_json::from_str(&chunks.as_str()).unwrap();
     let (sct_tx, sct_rx) = mpsc::channel();
 
-    println!("{:?}", chunkmap);
+    debug!("{:?}", chunkmap);
     let mut t_handles: Vec<thread::JoinHandle<_>> = vec![];
     for (k, v) in &chunkmap {
         let nextserver_ip = v[0].clone();
@@ -89,7 +92,7 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
         "metadata" :   metadata,
          })
         .to_string();
-        println!("{}", content);
+        debug!("{}", content);
 
         let data = ServiceMessage {
             uuid: proxy_server_uuid.clone(),
@@ -102,7 +105,7 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
 
         let dup_sct_tx = mpsc::Sender::clone(&sct_tx);
         let storage_client_thread = thread::spawn(move || {
-            let mut cstream = TcpStream::connect(nextserver_ip.clone()).unwrap();
+            let mut cstream = try_connect(nextserver_ip.clone()).unwrap();
             cstream.write_all(msg_data.as_bytes()).unwrap();
             cstream.flush().unwrap();
 
@@ -112,7 +115,7 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
             loop {
                 let dno = cstream.read(&mut destbuffer).unwrap();
                 total += dno;
-                println!("Total {} - dno {} - size {}", total, dno, size);
+                debug!("Total {} - dno {} - size {}", total, dno, size);
                 bufvec.append(&mut destbuffer[0..dno].to_vec());
                 if total == size {
                     break;
@@ -143,14 +146,15 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
         )
         .unwrap();
     stream.flush().unwrap();
-
+    let mut resp = [0; 512];
+    let no = stream.read(&mut resp).unwrap();
     for received in sct_rx.iter() {
         match received {
             ((size, index), chunk, dat) => {
                 let end: &String = &dat;
                 let mut resp = [0; 512];
                 if end.trim() == String::from("End") {
-                    println!("{:?}", end.trim());
+                    debug!("{:?}", end.trim());
                     stream
                         .write_all(
                             json!({
@@ -162,7 +166,7 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
                         .unwrap();
                     break;
                 }
-                println!("Senting to client chunk of Size :- {} ", size);
+                debug!("Senting to client chunk of Size :- {} ", size);
                 stream
                     .write_all(
                         json!({
@@ -201,7 +205,7 @@ pub fn write_storage(
     resp: Value,
 ) -> std::result::Result<String, ()> {
     let proxy_server_uuid = HELLO_WORLD.to_string();
-    println!("Writing file");
+    debug!("Writing file");
     let filesize = msg["filesize"].as_u64().unwrap();
     let filename = msg["filename"].as_str().unwrap().to_string();
     let user_uuid = msg["id"].as_str().unwrap().to_string();
@@ -215,7 +219,7 @@ pub fn write_storage(
 
     // Store the node ips to a
     for i in alloc_nodes.iter() {
-        println!("{}", i);
+        debug!("{}", i);
         node_array.push(i.as_str().unwrap().split(":").collect::<Vec<&str>>()[0].to_string());
     }
 
@@ -232,10 +236,10 @@ pub fn write_storage(
         for received in meta_rx.iter() {
             match received {
                 (metadata, ip) => {
-                    //println!("Received meadata {}", metadata);
+                    //debug!("Received meadata {}", metadata);
                     let end: &String = &metadata;
                     if end.trim() == String::from("End") {
-                        println!("{:?}", end.trim());
+                        debug!("{:?}", end.trim());
                         break;
                     }
 
@@ -265,7 +269,7 @@ pub fn write_storage(
             match recv {
                 (index, ip, chunkbuf) => {
                     let end: &String = &ip;
-                    println!("{:?}", end.trim());
+                    debug!("{:?}", end.trim());
                     if end.trim() == String::from("End") {
                         for handle in t_handles {
                             handle.join().unwrap();
@@ -278,7 +282,7 @@ pub fn write_storage(
                     let nextserver_ip = format!("{}:7777", &ip);
 
                     let datachunk: Vec<u8> = chunkbuf;
-                    println!(
+                    debug!(
                         "Index [{}] : Forwarding chunk {:?} ",
                         index,
                         datachunk.len()
@@ -306,7 +310,7 @@ pub fn write_storage(
 
                         let mut resp = [0; 512];
 
-                        let mut cstream = TcpStream::connect(nextserver_ip.clone()).unwrap();
+                        let mut cstream = try_connect(nextserver_ip.clone()).unwrap();
                         cstream.write_all(msg_data.as_bytes()).unwrap();
                         cstream.flush().unwrap();
 
@@ -315,7 +319,7 @@ pub fn write_storage(
                         if std::str::from_utf8(&resp[0..no]).unwrap() == "OK" {
                             cstream.write_all(datachunk.as_slice()).unwrap();
                             cstream.flush().unwrap();
-                            //println!("Sent Chunk");
+                            //debug!("Sent Chunk");
                         }
 
                         let dno = cstream.read(&mut resp).unwrap();
@@ -341,10 +345,10 @@ pub fn write_storage(
         total += dno;
         tempbuffer.append(&mut destbuffer[0..dno].to_vec());
         if index == 1 {
-            println!("{:?}", tempbuffer);
+            debug!("{:?}", tempbuffer);
         }
         if total % 65536 == 0 {
-            println!("{}", node_array.len());
+            debug!("{}", node_array.len());
             let ip = node_array[index % node_array.len()].to_owned();
             sct_tx.send((index, ip, tempbuffer.clone())).unwrap();
             index += 1;
@@ -365,7 +369,6 @@ pub fn write_storage(
     let chunkdata: String = meta_thread.join().unwrap();
     let file_uuid = Uuid::new_v4().to_string();
 
-    // TODO Get uuid from the user message
 
     let client = redis::Client::open("redis://172.28.5.3/7").unwrap();
     let mut con = client.get_connection().unwrap();
@@ -378,6 +381,14 @@ pub fn write_storage(
         }
     };
     let mut filemap: Value = serde_json::from_str(&filedata.as_str()).unwrap();
+    
+    //**********************************************************************************************
+
+    // TODO Check if the file already exists
+    // TODO Manage the app and key-value store metadate seperately (Implement a seperate structure) 
+    
+   
+    //**********************************************************************************************
 
     // Inserting new file
     filemap[&filename] = json!({
@@ -385,7 +396,7 @@ pub fn write_storage(
         "size": filesize,
         "creation_date": "date",
     });
-    println!("{:?} - {:?}", file_uuid, chunkdata);
+    debug!("{:?} - {:?}", file_uuid, chunkdata);
     let _: () = con.set(&user_uuid, filemap.to_string()).unwrap();
     let _: () = con.set(&file_uuid, chunkdata).unwrap();
 
@@ -429,13 +440,13 @@ pub fn getfromstore(
     });
 
     let msg_data = serde_json::to_string(&data).unwrap();
-    //println!("{}",test["content"].as_str().unwrap(());
+    //debug!("{}",test["content"].as_str().unwrap(());
 
     let mut resp = [0; 2048];
     let mut destbuffer = [0 as u8; 2048];
 
-    let mut stream = TcpStream::connect(addr).unwrap();
-    //println!("{:?}", msg_data);
+    let mut stream = try_connect(addr).unwrap();
+    //debug!("{:?}", msg_data);
     stream.write_all(msg_data.as_bytes()).unwrap();
     stream.flush().unwrap();
     // TODO Handle the trailing character error
@@ -451,9 +462,9 @@ pub fn getfromstore(
     let mut totalfilesize = 0 as usize;
     loop {
         let no = stream.read(&mut resp).unwrap();
-        //println!("val {}",std::str::from_utf8(&resp[0..no]).unwrap());
+        //debug!("val {}",std::str::from_utf8(&resp[0..no]).unwrap());
         let metadata: Value = serde_json::from_slice(&resp[0..no]).unwrap();
-        //println!("{}",metadata);
+        //debug!("{}",metadata);
         if metadata["msg_type"].as_str().unwrap() == "End" {
             break;
         }
@@ -470,7 +481,7 @@ pub fn getfromstore(
             }
             total += dno;
             bufvec.insert(index as usize, destbuffer[0..dno].to_vec());
-            //println!("Total: {} - dno: {} - Size {}",total,dno,size);
+            //debug!("Total: {} - dno: {} - Size {}",total,dno,size);
             if total == size {
                 break;
             }
@@ -512,7 +523,7 @@ pub fn getfromstore(
 pub fn uploadtostore(stream: &mut TcpStream, data: String, addr: String) -> String {
     let proxy_server_uuid = HELLO_WORLD.to_string();
     let recv_data: Value = serde_json::from_str(&data).unwrap();
-    println!("{:?}", recv_data);
+    debug!("{:?}", recv_data);
 
     let map: HashMap<String, String> =
         serde_json::from_str(json!(recv_data["kv"]).to_string().as_str()).unwrap();
@@ -537,22 +548,22 @@ pub fn uploadtostore(stream: &mut TcpStream, data: String, addr: String) -> Stri
         uuid: proxy_server_uuid,
     });
     let msg_data = serde_json::to_string(&data).unwrap();
-    //println!("{}",test["content"].as_str().unwrap(());
+    //debug!("{}",test["content"].as_str().unwrap(());
 
     let mut resp = [0; 512];
-    let mut stream = TcpStream::connect(addr).unwrap();
-    println!("{:?}", msg_data);
+    let mut stream = try_connect(addr).unwrap();
+    debug!("{:?}", msg_data);
     stream.write_all(msg_data.as_bytes()).unwrap();
 
     let no = stream.read(&mut resp).unwrap();
     if std::str::from_utf8(&resp[0..no]).unwrap() == "OK" {
         stream.write_all(&buf.as_bytes()).unwrap();
-        println!("Sent");
+        debug!("Sent");
     }
 
     let no = stream.read(&mut resp).unwrap();
     let mut data = std::str::from_utf8(&resp[0..no]).unwrap();
-    println!("Returned: {}", data);
+    debug!("Returned: {}", data);
     key.to_string()
 }
 
@@ -565,14 +576,14 @@ pub async fn paas_main(stream: &mut TcpStream, http_data: &http::Http) {
 
     let server_addr = String::from("127.0.0.1:8080");
     let inbound = tokstream::from_std(stream.try_clone().unwrap()).unwrap();
-    println!("Got Connection");
+    info!("Got Connection");
     tokio::join!(transfer(inbound, server_addr.clone()));
 }
 
 async fn transfer(mut inbound: tokstream, proxy_addr: String) {
     let mut b1 = [0; 512];
-    //println!("{:?}",std::str::from_utf8(&b1[0..n]).unwrap());
-    println!("Relaying to app: {}", proxy_addr);
+    //debug!("{:?}",std::str::from_utf8(&b1[0..n]).unwrap());
+    info!("Relaying to app: {}", proxy_addr);
     let mut outbound = tokstream::connect(proxy_addr).await.unwrap();
     outbound
         .write(json!({"msg_type":"invoke"}).to_string().as_bytes())
@@ -676,7 +687,7 @@ pub mod http {
 pub fn faas_client_handler(stream: &mut TcpStream, data: String) {
     let proxy_server_uuid = HELLO_WORLD.to_string();
 
-    let req: Value = match serde_json::from_str(data.as_str()){
+    let req: Value = match serde_json::from_str(data.as_str()) {
         Ok(val) => val,
         _ => {
             stream
@@ -700,7 +711,7 @@ pub fn faas_client_handler(stream: &mut TcpStream, data: String) {
             return;
         }
     };
-    println!("{:?}",faasjson);
+    debug!("{:?}", faasjson);
     let mut faasmap: Value = serde_json::from_str(&faasjson.as_str()).unwrap();
     let faas_data: Vec<Value> = faasmap[req["faas_uuid"].as_str().unwrap()]
         .as_array()
@@ -759,10 +770,10 @@ mod tests {
                 "size": "filesize",
                 "creation_date": "date",
             },});
-        println!("{}", filename);
+        debug!("{}", filename);
         filename["newfile"] = json!({
             "id": "newid",
         });
-        println!("{}", filename);
+        debug!("{}", filename);
     }
 }

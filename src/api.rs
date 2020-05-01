@@ -1,4 +1,4 @@
-use log::info;
+use log::{info,debug};
 use redis::Commands;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -10,8 +10,10 @@ use std::str;
 use std::sync::mpsc;
 use std::thread;
 use uuid::Uuid;
-
+use chrono::{NaiveDateTime, Utc};
 use super::mode;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use crate::message::{
     Message, NodeMessage, NodeMsgType, ServiceMessage, ServiceMsgType, ServiceType,
@@ -81,7 +83,7 @@ fn server_api_handler(
             "kv.cbnb.com" => {
                 Http::parse(stream, 0).unwrap();
                 kvstore_client_handler(stream, data, path, method);
-            },
+            }
             "paas.cbnb.com" => {
                 paas_main(stream, &http_content);
             }
@@ -98,7 +100,7 @@ fn server_api_handler(
         let mut buffer = [0; 100_000];
         let no = stream.read(&mut buffer).unwrap();
         let recv_data: Message = serde_json::from_slice(&buffer[0..no]).unwrap();
-        //println!("{}", recv_data);
+        //info!("{}", recv_data);
 
         match recv_data {
             Message::Node(node) => match node.msg_type {
@@ -118,7 +120,7 @@ fn server_api_handler(
             Message::Service(service) => match service.msg_type {
                 ServiceMsgType::SERVICEINIT => match service.service_type {
                     ServiceType::Faas => {
-                        //println!("{}", service.content);
+                        //info!("{}", service.content);
                         let mut destbuffer = [0 as u8; 512];
 
                         let faasdata = Message::Service(ServiceMessage {
@@ -146,7 +148,7 @@ fn server_api_handler(
                                     .to_string(),
                             );
                         }
-                        // println!("{:?}", node_array);
+                        // info!("{:?}", node_array);
 
                         // Forward the request to the node server and get the faas uuid and store the ip and the uuid as a vec of tuple
                         for i in node_array {
@@ -188,7 +190,7 @@ fn server_api_handler(
                     ServiceType::Storage => {
                         let msg: Value = serde_json::from_str(&service.content).unwrap();
 
-                        println!("{}", msg);
+                        debug!("{}", msg);
 
                         match msg["msg_type"].as_str().unwrap() {
                             "query" => {
@@ -201,7 +203,7 @@ fn server_api_handler(
 
                             "write" => {
                                 let mut destbuffer = [0 as u8; 512];
-                                let faasdata = Message::Service(ServiceMessage {
+                                let storagedata = Message::Service(ServiceMessage {
                                     uuid: proxy_server_uuid,
                                     msg_type: ServiceMsgType::SERVICEINIT,
                                     service_type: ServiceType::Faas,
@@ -211,7 +213,7 @@ fn server_api_handler(
                                     .to_string(),
                                 });
 
-                                let core_msg = serde_json::to_string(&faasdata).unwrap();
+                                let core_msg = serde_json::to_string(&storagedata).unwrap();
                                 // Fetch list of suitable nodes from the core_server
                                 let dno = forward_to(
                                     coreserver_ip,
@@ -235,6 +237,17 @@ fn server_api_handler(
                             "deploy" => {
                                 // Fetch list of suitable nodes from the core_server
                                 let mut destbuffer = [0 as u8; 512];
+                                
+                                //let parse_from_str = NaiveDateTime::parse_from_str;
+                                //let a = parse_from_str(&utc, "%s").unwrap();
+                                let timestamp = Utc::now().timestamp().to_string();
+                                let filename = format!("_capp_{}.zip",timestamp);
+                                let fname = json!({
+                                        "filename" : filename,
+                                    })
+                                .to_string();
+                                stream.write_all(fname.as_bytes()).unwrap();
+                                stream.flush().unwrap();
 
                                 let paasnode = Message::Service(ServiceMessage {
                                     uuid: proxy_server_uuid.clone(),
@@ -246,10 +259,10 @@ fn server_api_handler(
                                     .to_string(),
                                 });
 
-                                let msg = serde_json::to_string(&paasnode).unwrap();
+                                let msg_cont = serde_json::to_string(&paasnode).unwrap();
                                 let dno = forward_to(
                                     coreserver_ip,
-                                    msg.as_bytes(),
+                                    msg_cont.as_bytes(),
                                     &mut destbuffer,
                                     &data,
                                 );
@@ -267,16 +280,42 @@ fn server_api_handler(
                                             .to_string(),
                                     );
                                 }
-                                let paasdata = Message::Service(ServiceMessage {
+
+
+
+                                //***********************************************************
+                                // Data to be forwarded to the nodes
+                                // TODO Currently the fileid is same as the userid
+                                // TODO the storage function needs to implement a wrapper
+                                // TODO to hide the real uid and only give access to cloud apps storage
+                                let paasdata = ServiceMessage {
                                     uuid: proxy_server_uuid.clone(),
                                     msg_type: ServiceMsgType::SERVICEINIT,
                                     service_type: ServiceType::Paas,
-                                    content: service.content,
-                                });
+                                    content: json!({
+                                        "msg_type": "deploy",
+                                        "runtime": msg["runtime"],
+                                        "filename": filename,
+                                        "fileid": service.uuid,
+                                        }).to_string(),
+                                };
+                                let no = stream.read(&mut destbuffer).unwrap();
+                                let mut status: Value = serde_json::from_slice(&destbuffer[0..no]).unwrap();
+                                match status["UploadStatus"].as_str().unwrap(){
+                                    "OK" => {
+                                        debug!("Upload Complete");
+                                    }
+                                    _=>{
+                                        respond_back(stream, format!("App deployed Failed").as_bytes());
+                                        return;
+                                    }
+                                }
 
                                 let node_msg = serde_json::to_string(&paasdata).unwrap();
-
+                                let mut cnt = 0;
                                 for i in node_array {
+                                    if cnt >3{break;}
+                                    cnt+=1;
                                     let nextserver_ip = format!("{}:7777", &i);
                                     let dno = forward_to(
                                         nextserver_ip.clone(),
@@ -289,13 +328,48 @@ fn server_api_handler(
                                         str::from_utf8(&destbuffer[0..dno]).unwrap().to_string(),
                                     ])
                                 }
-                                //Handle saving of details to the cache and db
+                                let client = redis::Client::open("redis://172.28.5.3/9").unwrap();
+                                let mut con = client.get_connection().unwrap();
+
+                                let user_uuid = service.uuid;
+                                let timestamp = Utc::now().timestamp().to_string();
+                                let mut hasher = DefaultHasher::new();
+                                format!("{}_{}",timestamp,user_uuid).hash(&mut hasher);
+                                let apphash = format!("app-{}",hasher.finish());
+                                
+                                let paasdata: String = match con.get(&user_uuid) {
+                                    Ok(val) => val,
+                                    _ => {
+                                        let _: () = con.set(&user_uuid, json!({
+                                            "apps" : [],
+                                        }).to_string()).unwrap();
+                                        json!({}).to_string()
+                                    }
+                                };
+                                let mut paasmap: Value = serde_json::from_str(&paasdata.as_str()).unwrap();
+
+                                let apps = paasmap["apps"].as_array().unwrap();
+                                let mut appids: Vec<String> = Vec::new();
+                                println!("{}",apps.len());
+                                if apps.len() != 0{
+                                for i in apps {
+                                    appids.push(i.as_str().unwrap().to_string());
+                                }}
+                                appids.push(apphash.clone());
+                                paasmap["apps"] = json!(appids);
+                                // Wait for the acknowledgement from the app file upload from the user
+                                let _: () = con.set(&apphash, json!(nodedata).to_string()).unwrap();
+                                let _: () = con.set(&user_uuid, paasmap.to_string()).unwrap();
+                                respond_back(stream, format!("App deployed at {}.cbnb.com",apphash).as_bytes());
+                                // TODO Forward some message to the node to report the file upload
+                                // TODO or only send to the node if the upload failed
                             }
                             _ => {}
                         }
                     }
                 },
                 ServiceMsgType::SERVICEUPDATE => match service.service_type {
+                    // TODO Consider refactoo
                     ServiceType::Faas => {
                         let mut destbuffer = [0 as u8; 512];
                         let faasdata: Value =
@@ -348,14 +422,13 @@ fn server_api_handler(
         };
     }
 }
-
-pub fn forward_to(ip: String, buffer: &[u8], destbuffer: &mut [u8; 512], sip: &String) -> usize {
+pub fn try_connect(ip: String) -> Result<TcpStream,()> {
     use std::{thread, time};
-    info!("Forwarding connection to [{}]", &ip);
+    info!("connecting to [{}]", &ip);
     let mut cnt = 0;
     loop {
-        let mut deststream = match TcpStream::connect(&ip) {
-            Ok(val) => val,
+        match TcpStream::connect(&ip) {
+            Ok(val) => return Ok(val),
             _ => {
                 if cnt != 5 {
                     let sec = time::Duration::from_secs(2);
@@ -366,19 +439,23 @@ pub fn forward_to(ip: String, buffer: &[u8], destbuffer: &mut [u8; 512], sip: &S
                 } else {
                     info!("Drop connection attempt");
                     // TODO Handler all the return at the caller properly
-                    return 0;
+                    return Err(());
                 }
             }
         };
-        if ip.ends_with("7778") {
-            deststream.write(sip.as_bytes()).unwrap();
-            deststream.read(destbuffer).unwrap();
-        }
-        deststream.write_all(&buffer).unwrap();
-        deststream.flush().unwrap();
-
-        return deststream.read(destbuffer).unwrap();
     }
+}
+
+pub fn forward_to(ip: String, buffer: &[u8], destbuffer: &mut [u8; 512], sip: &String) -> usize {
+    info!("Forwarding connection to [{}]", &ip);
+    let mut deststream = try_connect(ip.clone()).unwrap();
+    if ip.ends_with("7778") {
+        deststream.write(sip.as_bytes()).unwrap();
+        deststream.read(destbuffer).unwrap();
+    }
+    deststream.write_all(&buffer).unwrap();
+    deststream.flush().unwrap();
+    return deststream.read(destbuffer).unwrap();
 }
 
 pub fn respond_back(stream: &mut TcpStream, destbuffer: &[u8]) -> () {
