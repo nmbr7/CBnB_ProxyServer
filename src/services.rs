@@ -579,7 +579,29 @@ pub async fn paas_main(stream: &mut TcpStream, http_data: &http::Http, appid: St
     //let app_uuid = path[1];
     // TODO Lookup the node related to the app_uuid from the proxy server or from the cache;
     let tag = appid.to_string();
-    let server_addr = String::from("172.17.0.2:9090");
+    
+    let client = redis::Client::open("redis://172.28.5.3/9").unwrap();
+    let mut con = client.get_connection().unwrap();
+    let nodedata: String = con.get(&tag).unwrap();
+
+    let paasjson: String = match con.get(&tag) {
+        Ok(val) => val,
+        _ => {
+            stream
+                .write_all(format!("HTTP/1.1 404 Not Found\r\n\r\n").as_bytes())
+                .unwrap();
+            stream.flush();
+            return;
+        }
+    };
+    debug!("{:?}", paasjson);
+    let mut paasarray: Value = serde_json::from_str(&paasjson.as_str()).unwrap();
+
+
+
+    let paas_data: Vec<Value> = paasarray.as_array().unwrap().to_vec();
+
+    let server_addr = format!("{}:9090",paas_data[0][0].as_str().unwrap().split(":").collect::<Vec<&str>>()[0]);
     let inbound = tokstream::from_std(stream.try_clone().unwrap()).unwrap();
     info!("Got Connection");
     tokio::join!(transfer(inbound, server_addr.clone(), tag));
