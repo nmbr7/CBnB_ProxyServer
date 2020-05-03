@@ -1,7 +1,11 @@
-use log::{info,debug};
+use super::mode;
+use chrono::{NaiveDateTime, Utc};
+use log::{debug, info};
 use redis::Commands;
 use serde_json::{json, Value};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::net::TcpListener;
@@ -10,10 +14,6 @@ use std::str;
 use std::sync::mpsc;
 use std::thread;
 use uuid::Uuid;
-use chrono::{NaiveDateTime, Utc};
-use super::mode;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 use crate::message::{
     Message, NodeMessage, NodeMsgType, ServiceMessage, ServiceMsgType, ServiceType,
@@ -71,8 +71,8 @@ fn server_api_handler(
             method, host, path, data
         );
         // http routing based on the host name
-        match host.as_str() {
-            "faas.cbnb.com" => match path[0] {
+        match host.as_str().trim_end_matches(".cbnb.com") {
+            "faas" => match path[0] {
                 "invoke" => {
                     // Check the id here itself and respond accordingly
                     Http::parse(stream, 0).unwrap();
@@ -80,12 +80,25 @@ fn server_api_handler(
                 }
                 _ => {}
             },
-            "kv.cbnb.com" => {
+            "kv" => {
                 Http::parse(stream, 0).unwrap();
                 kvstore_client_handler(stream, data, path, method);
             }
-            "paas.cbnb.com" => {
-                paas_main(stream, &http_content);
+            subdomain => {
+                paas_main(stream, &http_content, subdomain.to_string());
+                /*
+                let subs = subdomain.split(".").collect::<Vec<&str>>();
+                    "paas" => paas_main(stream, &http_content, subs[0].to_string()),
+                match subs[1]{
+                    _=>{
+                info!("[invalid request]");
+                stream
+                    .write_all(format!("HTTP/1.1 404 Not Found\r\n\r\n").as_bytes())
+                    .unwrap();
+                stream.flush();
+                return;
+                    }
+                }*/
             }
             _ => {
                 info!("[invalid request]");
@@ -237,14 +250,14 @@ fn server_api_handler(
                             "deploy" => {
                                 // Fetch list of suitable nodes from the core_server
                                 let mut destbuffer = [0 as u8; 512];
-                                
+
                                 //let parse_from_str = NaiveDateTime::parse_from_str;
                                 //let a = parse_from_str(&utc, "%s").unwrap();
                                 let timestamp = Utc::now().timestamp().to_string();
-                                let filename = format!("_capp_{}.zip",timestamp);
+                                let filename = format!("_capp_{}.zip", timestamp);
                                 let fname = json!({
-                                        "filename" : filename,
-                                    })
+                                    "filename" : filename,
+                                })
                                 .to_string();
                                 stream.write_all(fname.as_bytes()).unwrap();
                                 stream.flush().unwrap();
@@ -281,7 +294,11 @@ fn server_api_handler(
                                     );
                                 }
 
-
+                                let user_uuid = service.uuid.clone();
+                                let timestamp = Utc::now().timestamp().to_string();
+                                let mut hasher = DefaultHasher::new();
+                                format!("{}_{}", timestamp, user_uuid).hash(&mut hasher);
+                                let apphash = format!("app-{}", hasher.finish());
 
                                 //***********************************************************
                                 // Data to be forwarded to the nodes
@@ -293,20 +310,26 @@ fn server_api_handler(
                                     msg_type: ServiceMsgType::SERVICEINIT,
                                     service_type: ServiceType::Paas,
                                     content: json!({
-                                        "msg_type": "deploy",
-                                        "runtime": msg["runtime"],
-                                        "filename": filename,
-                                        "fileid": service.uuid,
-                                        }).to_string(),
+                                    "msg_type": "deploy",
+                                    "runtime": msg["runtime"],
+                                    "filename": filename,
+                                    "fileid": service.uuid,
+                                    "tag":apphash,
+                                    })
+                                    .to_string(),
                                 };
                                 let no = stream.read(&mut destbuffer).unwrap();
-                                let mut status: Value = serde_json::from_slice(&destbuffer[0..no]).unwrap();
-                                match status["UploadStatus"].as_str().unwrap(){
+                                let mut status: Value =
+                                    serde_json::from_slice(&destbuffer[0..no]).unwrap();
+                                match status["UploadStatus"].as_str().unwrap() {
                                     "OK" => {
                                         debug!("Upload Complete");
                                     }
-                                    _=>{
-                                        respond_back(stream, format!("App deployed Failed").as_bytes());
+                                    _ => {
+                                        respond_back(
+                                            stream,
+                                            format!("App deployed Failed").as_bytes(),
+                                        );
                                         return;
                                     }
                                 }
@@ -314,8 +337,10 @@ fn server_api_handler(
                                 let node_msg = serde_json::to_string(&paasdata).unwrap();
                                 let mut cnt = 0;
                                 for i in node_array {
-                                    if cnt >3{break;}
-                                    cnt+=1;
+                                    if cnt > 3 {
+                                        break;
+                                    }
+                                    cnt += 1;
                                     let nextserver_ip = format!("{}:7777", &i);
                                     let dno = forward_to(
                                         nextserver_ip.clone(),
@@ -331,36 +356,41 @@ fn server_api_handler(
                                 let client = redis::Client::open("redis://172.28.5.3/9").unwrap();
                                 let mut con = client.get_connection().unwrap();
 
-                                let user_uuid = service.uuid;
-                                let timestamp = Utc::now().timestamp().to_string();
-                                let mut hasher = DefaultHasher::new();
-                                format!("{}_{}",timestamp,user_uuid).hash(&mut hasher);
-                                let apphash = format!("app-{}",hasher.finish());
-                                
                                 let paasdata: String = match con.get(&user_uuid) {
                                     Ok(val) => val,
                                     _ => {
-                                        let _: () = con.set(&user_uuid, json!({
-                                            "apps" : [],
-                                        }).to_string()).unwrap();
+                                        let _: () = con
+                                            .set(
+                                                &user_uuid,
+                                                json!({
+                                                    "apps" : [],
+                                                })
+                                                .to_string(),
+                                            )
+                                            .unwrap();
                                         json!({}).to_string()
                                     }
                                 };
-                                let mut paasmap: Value = serde_json::from_str(&paasdata.as_str()).unwrap();
+                                let mut paasmap: Value =
+                                    serde_json::from_str(&paasdata.as_str()).unwrap();
 
                                 let apps = paasmap["apps"].as_array().unwrap();
                                 let mut appids: Vec<String> = Vec::new();
-                                println!("{}",apps.len());
-                                if apps.len() != 0{
-                                for i in apps {
-                                    appids.push(i.as_str().unwrap().to_string());
-                                }}
+                                println!("{}", apps.len());
+                                if apps.len() != 0 {
+                                    for i in apps {
+                                        appids.push(i.as_str().unwrap().to_string());
+                                    }
+                                }
                                 appids.push(apphash.clone());
                                 paasmap["apps"] = json!(appids);
                                 // Wait for the acknowledgement from the app file upload from the user
                                 let _: () = con.set(&apphash, json!(nodedata).to_string()).unwrap();
                                 let _: () = con.set(&user_uuid, paasmap.to_string()).unwrap();
-                                respond_back(stream, format!("App deployed at {}.cbnb.com",apphash).as_bytes());
+                                respond_back(
+                                    stream,
+                                    format!("App deployed at {}.cbnb.com", apphash).as_bytes(),
+                                );
                                 // TODO Forward some message to the node to report the file upload
                                 // TODO or only send to the node if the upload failed
                             }
@@ -422,7 +452,7 @@ fn server_api_handler(
         };
     }
 }
-pub fn try_connect(ip: String) -> Result<TcpStream,()> {
+pub fn try_connect(ip: String) -> Result<TcpStream, ()> {
     use std::{thread, time};
     info!("connecting to [{}]", &ip);
     let mut cnt = 0;

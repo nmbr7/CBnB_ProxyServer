@@ -1,5 +1,6 @@
-use crate::api::{try_connect, forward_to, respond_back};
+use crate::api::{forward_to, respond_back, try_connect};
 use crate::message::{Message, ServiceMessage, ServiceMsgType, ServiceType};
+use log::{debug, info};
 use redis::Commands;
 use serde_json::{json, Result, Value};
 use std::collections::HashMap;
@@ -10,7 +11,6 @@ use std::str;
 use std::sync::mpsc;
 use std::thread;
 use uuid::Uuid;
-use log::{info,debug};
 
 // Async related
 use futures::future::try_join;
@@ -34,7 +34,7 @@ pub fn query_storage(stream: &mut TcpStream, msg: Value) {
     let user_uuid = msg["id"].as_str().unwrap().to_string();
     let query = msg["queryname"].as_str().unwrap();
     let files: String = con.get(&user_uuid).unwrap();
-    debug!("{}", files);
+    //debug!("{}", files);
     let mut filemap: HashMap<String, HashMap<String, Value>> =
         serde_json::from_str(&files.as_str()).unwrap();
     match query {
@@ -64,11 +64,11 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
     let filemap: HashMap<String, HashMap<String, Value>> =
         serde_json::from_str(&files.as_str()).unwrap();
 
-    debug!("\n********************************************************");
-    debug!("{:?}", filemap);
-    debug!("{:?\n}", filename);
-    debug!("{}", filemap[&filename]["chunk_id"]);
-    debug!("\n********************************************************");
+    //debug!("\n********************************************************");
+    //debug!("{:?}", filemap);
+    //debug!("{:?\n}", filename);
+    //debug!("{}", filemap[&filename]["chunk_id"]);
+    //debug!("\n********************************************************");
 
     let filesize = &filemap[&filename]["size"];
     let chunks: String = con
@@ -77,7 +77,7 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
     let chunkmap: HashMap<String, Vec<String>> = serde_json::from_str(&chunks.as_str()).unwrap();
     let (sct_tx, sct_rx) = mpsc::channel();
 
-    debug!("{:?}", chunkmap);
+    //debug!("{:?}", chunkmap);
     let mut t_handles: Vec<thread::JoinHandle<_>> = vec![];
     for (k, v) in &chunkmap {
         let nextserver_ip = v[0].clone();
@@ -121,69 +121,49 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
                     break;
                 }
             }
-
             dup_sct_tx
                 .send(((size, index), bufvec, "data".to_string()))
                 .unwrap();
         });
-
         t_handles.push(storage_client_thread);
     }
-
     for handle in t_handles {
         handle.join().unwrap();
     }
-    sct_tx
-        .send(((0 as usize, 0 as usize), vec![], "End".to_string()))
-        .unwrap();
-    stream
-        .write_all(
-            json!({
-                "total_size": filesize,
-            })
-            .to_string()
-            .as_bytes(),
-        )
-        .unwrap();
+    sct_tx.send(((0 as usize, 0 as usize), vec![], "End".to_string())).unwrap();
+    stream.write_all(json!({"total_size": filesize}).to_string().as_bytes()).unwrap();
     stream.flush().unwrap();
     let mut resp = [0; 512];
     let no = stream.read(&mut resp).unwrap();
-    for received in sct_rx.iter() {
+    for received in sct_rx.try_iter() {
         match received {
             ((size, index), chunk, dat) => {
                 let end: &String = &dat;
-                let mut resp = [0; 512];
                 if end.trim() == String::from("End") {
-                    debug!("{:?}", end.trim());
-                    stream
-                        .write_all(
+                    debug!("Sending {:?}", end.trim());
+                    stream.write_all(
                             json!({
                                 "msg_type": "End",
                             })
                             .to_string()
-                            .as_bytes(),
-                        )
-                        .unwrap();
+                            .as_bytes()).unwrap();
+                    stream.flush().unwrap();
                     break;
                 }
-                debug!("Senting to client chunk of Size :- {} ", size);
-                stream
-                    .write_all(
-                        json!({
+                debug!("Index [{}] - Senting to client chunk metadata",index);
+                stream.write_all(json!({
                             "msg_type": "meta",
-                            "size" : size,
-                            "index" : index,
-                        })
-                        .to_string()
-                        .as_bytes(),
-                    )
-                    .unwrap();
+                            "size"    : size,
+                            "index"   : index,
+                        }).to_string().as_bytes()).unwrap();
                 stream.flush().unwrap();
                 let no = stream.read(&mut resp).unwrap();
-
                 if std::str::from_utf8(&resp[0..no]).unwrap() == "OK" {
+                    debug!("Index [{}] - Received OK, Senting to client chunk data  of Size :- {} ",index, size);
                     stream.write_all(&chunk.as_slice()).unwrap();
                     stream.flush().unwrap();
+                    let no = stream.read(&mut resp).unwrap();
+                    debug!("Index [{}] - Response after sending chunk {}",index,std::str::from_utf8(&resp[0..no]).unwrap());
                 }
                 // TODO
                 // Combine the encrypted file chunks in correct order and decrypt it using some key
@@ -344,11 +324,12 @@ pub fn write_storage(
         let dno = stream.read(&mut destbuffer).unwrap();
         total += dno;
         tempbuffer.append(&mut destbuffer[0..dno].to_vec());
-        if index == 1 {
+        /*if index == 1 {
             debug!("{:?}", tempbuffer);
-        }
-        if total % 65536 == 0 {
-            debug!("{}", node_array.len());
+        }*/
+        //if total % 65536 == 0 {
+        if total % 1048576 == 0 {
+            //debug!("{}", node_array.len());
             let ip = node_array[index % node_array.len()].to_owned();
             sct_tx.send((index, ip, tempbuffer.clone())).unwrap();
             index += 1;
@@ -369,7 +350,6 @@ pub fn write_storage(
     let chunkdata: String = meta_thread.join().unwrap();
     let file_uuid = Uuid::new_v4().to_string();
 
-
     let client = redis::Client::open("redis://172.28.5.3/7").unwrap();
     let mut con = client.get_connection().unwrap();
 
@@ -381,13 +361,12 @@ pub fn write_storage(
         }
     };
     let mut filemap: Value = serde_json::from_str(&filedata.as_str()).unwrap();
-    
+
     //**********************************************************************************************
 
     // TODO Check if the file already exists
-    // TODO Manage the app and key-value store metadate seperately (Implement a seperate structure) 
-    
-   
+    // TODO Manage the app and key-value store metadate seperately (Implement a seperate structure)
+
     //**********************************************************************************************
 
     // Inserting new file
@@ -396,7 +375,7 @@ pub fn write_storage(
         "size": filesize,
         "creation_date": "date",
     });
-    debug!("{:?} - {:?}", file_uuid, chunkdata);
+    //debug!("{:?} - {:?}", file_uuid, chunkdata);
     let _: () = con.set(&user_uuid, filemap.to_string()).unwrap();
     let _: () = con.set(&file_uuid, chunkdata).unwrap();
 
@@ -568,25 +547,32 @@ pub fn uploadtostore(stream: &mut TcpStream, data: String, addr: String) -> Stri
 }
 
 #[tokio::main]
-pub async fn paas_main(stream: &mut TcpStream, http_data: &http::Http) {
+pub async fn paas_main(stream: &mut TcpStream, http_data: &http::Http, appid: String) {
     let mut path = http_data.path.split("/").collect::<Vec<&str>>();
     path.remove(0);
     //let app_uuid = path[1];
     // TODO Lookup the node related to the app_uuid from the proxy server or from the cache;
-
-    let server_addr = String::from("127.0.0.1:8080");
+    let tag = appid.to_string();
+    let server_addr = String::from("172.17.0.2:9090");
     let inbound = tokstream::from_std(stream.try_clone().unwrap()).unwrap();
     info!("Got Connection");
-    tokio::join!(transfer(inbound, server_addr.clone()));
+    tokio::join!(transfer(inbound, server_addr.clone(), tag));
 }
 
-async fn transfer(mut inbound: tokstream, proxy_addr: String) {
+async fn transfer(mut inbound: tokstream, proxy_addr: String, tag: String) {
     let mut b1 = [0; 512];
     //debug!("{:?}",std::str::from_utf8(&b1[0..n]).unwrap());
     info!("Relaying to app: {}", proxy_addr);
     let mut outbound = tokstream::connect(proxy_addr).await.unwrap();
     outbound
-        .write(json!({"msg_type":"invoke"}).to_string().as_bytes())
+        .write(
+            json!({
+                "msg_type":"invoke",
+                "tag":tag,
+            })
+            .to_string()
+            .as_bytes(),
+        )
         .await
         .unwrap();
     outbound.read(&mut b1).await.unwrap();
