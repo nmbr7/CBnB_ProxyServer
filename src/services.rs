@@ -130,8 +130,12 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
     for handle in t_handles {
         handle.join().unwrap();
     }
-    sct_tx.send(((0 as usize, 0 as usize), vec![], "End".to_string())).unwrap();
-    stream.write_all(json!({"total_size": filesize}).to_string().as_bytes()).unwrap();
+    sct_tx
+        .send(((0 as usize, 0 as usize), vec![], "End".to_string()))
+        .unwrap();
+    stream
+        .write_all(json!({ "total_size": filesize }).to_string().as_bytes())
+        .unwrap();
     stream.flush().unwrap();
     let mut resp = [0; 512];
     let no = stream.read(&mut resp).unwrap();
@@ -141,29 +145,45 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
                 let end: &String = &dat;
                 if end.trim() == String::from("End") {
                     debug!("Sending {:?}", end.trim());
-                    stream.write_all(
+                    stream
+                        .write_all(
                             json!({
                                 "msg_type": "End",
                             })
                             .to_string()
-                            .as_bytes()).unwrap();
+                            .as_bytes(),
+                        )
+                        .unwrap();
                     stream.flush().unwrap();
                     break;
                 }
-                debug!("Index [{}] - Senting to client chunk metadata",index);
-                stream.write_all(json!({
+                debug!("Index [{}] - Senting to client chunk metadata", index);
+                stream
+                    .write_all(
+                        json!({
                             "msg_type": "meta",
                             "size"    : size,
                             "index"   : index,
-                        }).to_string().as_bytes()).unwrap();
+                        })
+                        .to_string()
+                        .as_bytes(),
+                    )
+                    .unwrap();
                 stream.flush().unwrap();
                 let no = stream.read(&mut resp).unwrap();
                 if std::str::from_utf8(&resp[0..no]).unwrap() == "OK" {
-                    debug!("Index [{}] - Received OK, Senting to client chunk data  of Size :- {} ",index, size);
+                    debug!(
+                        "Index [{}] - Received OK, Senting to client chunk data  of Size :- {} ",
+                        index, size
+                    );
                     stream.write_all(&chunk.as_slice()).unwrap();
                     stream.flush().unwrap();
                     let no = stream.read(&mut resp).unwrap();
-                    debug!("Index [{}] - Response after sending chunk {}",index,std::str::from_utf8(&resp[0..no]).unwrap());
+                    debug!(
+                        "Index [{}] - Response after sending chunk {}",
+                        index,
+                        std::str::from_utf8(&resp[0..no]).unwrap()
+                    );
                 }
                 // TODO
                 // Combine the encrypted file chunks in correct order and decrypt it using some key
@@ -419,13 +439,13 @@ pub fn getfromstore(
     });
 
     let msg_data = serde_json::to_string(&data).unwrap();
-    //debug!("{}",test["content"].as_str().unwrap(());
+    //debug!("{}",test["content"].as_str().unwrap(()));
 
     let mut resp = [0; 2048];
     let mut destbuffer = [0 as u8; 2048];
 
     let mut stream = try_connect(addr).unwrap();
-    //debug!("{:?}", msg_data);
+    debug!("{:?}", msg_data);
     stream.write_all(msg_data.as_bytes()).unwrap();
     stream.flush().unwrap();
     // TODO Handle the trailing character error
@@ -436,32 +456,38 @@ pub fn getfromstore(
     if filesize > 1048576 {
         return String::from("OK");
     }
+    stream.write_all(String::from("OK").as_bytes()).unwrap();
+    stream.flush().unwrap();
     let mut bufvec: Vec<Vec<u8>> = Vec::with_capacity(filesize / 65536);
 
     let mut totalfilesize = 0 as usize;
     loop {
         let no = stream.read(&mut resp).unwrap();
-        //debug!("val {}",std::str::from_utf8(&resp[0..no]).unwrap());
+        stream.write_all(String::from("OK").as_bytes()).unwrap();
+        stream.flush().unwrap();
+        debug!("val {}", std::str::from_utf8(&resp[0..no]).unwrap());
         let metadata: Value = serde_json::from_slice(&resp[0..no]).unwrap();
-        //debug!("{}",metadata);
+        debug!("{}", metadata);
         if metadata["msg_type"].as_str().unwrap() == "End" {
             break;
         }
+
         let size = metadata["size"].as_u64().unwrap() as usize;
         let index = metadata["index"].as_u64().unwrap();
         let mut total = 0 as usize;
         //let mut bufvec: Vec<u8> = vec![];
-        stream.write_all(String::from("OK").as_bytes()).unwrap();
-        stream.flush().unwrap();
         loop {
             let mut dno = stream.read(&mut destbuffer).unwrap();
             if dno > size {
                 dno = size;
             }
             total += dno;
+            //println!("{:?}",destbuffer[(dno-15)..dno].to_vec());
             bufvec.insert(index as usize, destbuffer[0..dno].to_vec());
-            //debug!("Total: {} - dno: {} - Size {}",total,dno,size);
-            if total == size {
+            println!("Total: {} - dno: {} - Size {}", total, dno, size);
+            if total >= size {
+                stream.write_all(String::from("OK").as_bytes()).unwrap();
+                stream.flush().unwrap();
                 break;
             }
         }
@@ -699,7 +725,7 @@ pub fn faas_client_handler(stream: &mut TcpStream, data: String) {
     };
     debug!("{:?}", faasjson);
     let mut faasmap: Value = serde_json::from_str(&faasjson.as_str()).unwrap();
-    let faas_data: Vec<Value> = faasmap[req["faas_uuid"].as_str().unwrap()]
+    let faas_data: Vec<Value> = faasmap[req["faas_uuid"].as_str().unwrap()]["nodes"]
         .as_array()
         .unwrap()
         .to_vec();
@@ -725,7 +751,10 @@ pub fn faas_client_handler(stream: &mut TcpStream, data: String) {
             let msg = serde_json::to_string(&data).unwrap();
             let mut destbuffer = [0 as u8; 512];
             let dno = forward_to(
-                format!("{}:7777", faas[0]),
+                format!(
+                    "{}:7777",
+                    faas[0].as_str().unwrap().split(":").collect::<Vec<&str>>()[0]
+                ),
                 msg.as_bytes(),
                 &mut destbuffer,
                 &String::from(""),
@@ -740,6 +769,7 @@ pub fn faas_client_handler(stream: &mut TcpStream, data: String) {
     for handle in t_handles {
         resp_data.push(handle.join().unwrap());
     }
+    debug!("Faas Response {:?}", resp_data);
     //TODO Check the response and send it to the user
     respond_back(stream, resp_data[0].as_bytes());
 }

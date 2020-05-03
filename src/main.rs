@@ -39,7 +39,7 @@ fn main() -> () {
         })
         .to_string(),
     });
-    
+
     //let coreserver_ip = String::from("192.168.43.235:7778");
     let coreserver_ip = String::from("127.0.0.1:7778");
     let msg = serde_json::to_string(&reg_data).unwrap();
@@ -62,6 +62,7 @@ fn main() -> () {
             break;
         }
     }
+
     let (server_tx, server_rx) = mpsc::channel();
     let _server_thread = thread::spawn(move || {
         server_api_main(server_tx);

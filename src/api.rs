@@ -75,13 +75,13 @@ fn server_api_handler(
             "faas" => match path[0] {
                 "invoke" => {
                     // Check the id here itself and respond accordingly
-                    Http::parse(stream, 0).unwrap();
+                    Http::parse(stream, 1).unwrap();
                     faas_client_handler(stream, data);
                 }
                 _ => {}
             },
             "kv" => {
-                Http::parse(stream, 0).unwrap();
+                Http::parse(stream, 1).unwrap();
                 kvstore_client_handler(stream, data, path, method);
             }
             subdomain => {
@@ -134,6 +134,11 @@ fn server_api_handler(
                 ServiceMsgType::SERVICEINIT => match service.service_type {
                     ServiceType::Faas => {
                         //info!("{}", service.content);
+                        let faasco: Value =
+                            serde_json::from_str(&service.content.as_str()).unwrap();
+                        // Get uuid from the user
+                        debug!("{:?}", faasco);
+                        let faas_proto = faasco["prototype"].as_str().unwrap().to_string();
                         let mut destbuffer = [0 as u8; 512];
 
                         let faasdata = Message::Service(ServiceMessage {
@@ -162,6 +167,55 @@ fn server_api_handler(
                             );
                         }
                         // info!("{:?}", node_array);
+                        let client = redis::Client::open("redis://172.28.5.3/4").unwrap();
+                        let mut con = client.get_connection().unwrap();
+
+                        let user_uuid = &service.uuid;
+                        let faasdata: String = match con.get(user_uuid) {
+                            Ok(val) => val,
+                            _ => {
+                                let _: () = con
+                                    .set(
+                                        user_uuid,
+                                        json!({
+                                            "faass": [" "," "],
+                                        })
+                                        .to_string(),
+                                    )
+                                    .unwrap();
+                                json!({
+                                    "faass": [" "," "],
+                                })
+                                .to_string()
+                            }
+                        };
+                        let mut faasmap: Value = serde_json::from_str(&faasdata.as_str()).unwrap();
+                        let mut faas_array: Vec<String> = Vec::new();
+
+                        // Inserting new faas data
+                        debug!("{:?}", faasmap);
+                        let faass = faasmap["faass"].as_array().unwrap();
+                        for i in faass.iter() {
+                            faas_array.push(
+                                i.as_str().unwrap().split(":").collect::<Vec<&str>>()[0]
+                                    .to_string(),
+                            );
+                        }
+                        debug!("{:?}\n Faas_proto {:?} ", faas_array, faas_proto);
+                        for i in &faas_array {
+                            let mut hasher = DefaultHasher::new();
+                            faas_proto.hash(&mut hasher);
+                            let faashash = hasher.finish();
+                            debug!("{} == {}", i, faas_proto);
+                            if i == &faashash.to_string() {
+                                respond_back(stream, format!("Function already exists").as_bytes());
+                                return;
+                            }
+                        }
+                        let mut hasher = DefaultHasher::new();
+                        faas_proto.hash(&mut hasher);
+                        let faashash = hasher.finish();
+                        faas_array.push(faashash.to_string());
 
                         // Forward the request to the node server and get the faas uuid and store the ip and the uuid as a vec of tuple
                         for i in node_array {
@@ -178,25 +232,12 @@ fn server_api_handler(
                             ])
                         }
 
-                        let client = redis::Client::open("redis://172.28.5.3/4").unwrap();
-                        let mut con = client.get_connection().unwrap();
+                        faasmap["faass"] = json!(faas_array);
 
-                        let user_uuid = service.uuid;
-                        let faasdata: String = match con.get(&user_uuid) {
-                            Ok(val) => val,
-                            _ => {
-                                let _: () = con.set(&user_uuid, json!({}).to_string()).unwrap();
-                                json!({}).to_string()
-                            }
-                        };
-                        let mut faasmap: Value = serde_json::from_str(&faasdata.as_str()).unwrap();
-
-                        // Inserting new faas data
                         let faas_uuid = Uuid::new_v4().to_string();
-
-                        faasmap[&faas_uuid] = json!(nodedata);
-
-                        let _: () = con.set(&user_uuid, faasmap.to_string()).unwrap();
+                        faasmap[&faas_uuid] = json!({ "nodes": nodedata });
+                        debug!("Writing FaasMap {:?}", faasmap);
+                        let _: () = con.set(user_uuid, faasmap.to_string()).unwrap();
 
                         respond_back(stream, &faas_uuid.as_bytes());
                     }
@@ -219,7 +260,7 @@ fn server_api_handler(
                                 let storagedata = Message::Service(ServiceMessage {
                                     uuid: proxy_server_uuid,
                                     msg_type: ServiceMsgType::SERVICEINIT,
-                                    service_type: ServiceType::Faas,
+                                    service_type: ServiceType::Storage,
                                     content: json!({
                                         "request" : "select_node",
                                     })
@@ -405,16 +446,17 @@ fn server_api_handler(
                         let faasdata: Value =
                             serde_json::from_str(&service.content.as_str()).unwrap();
                         // Get uuid from the user
+                        debug!("{:?}", faasdata);
                         let faas_uuid = faasdata["id"].as_str().unwrap().to_string();
 
                         let client = redis::Client::open("redis://172.28.5.3/4").unwrap();
                         let mut con = client.get_connection().unwrap();
 
                         // Get the nodedata from the redis store (IP addresses and the faas UUID)
-                        let nodedata: String = con.get(&faas_uuid).unwrap();
+                        let nodedata: String = con.get(&service.uuid).unwrap();
 
                         let ndata: Value = serde_json::from_str(&nodedata.as_str()).unwrap();
-                        let ndataarray = ndata["data"].as_array().unwrap();
+                        let ndataarray = ndata[faas_uuid]["nodes"].as_array().unwrap();
                         // Temp read bytes
                         let mut dno: usize = 0;
 
