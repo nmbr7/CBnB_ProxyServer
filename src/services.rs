@@ -117,7 +117,7 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
                 total += dno;
                 debug!("Total {} - dno {} - size {}", total, dno, size);
                 bufvec.append(&mut destbuffer[0..dno].to_vec());
-                if total == size {
+                if total >= size {
                     break;
                 }
             }
@@ -139,6 +139,9 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
     stream.flush().unwrap();
     let mut resp = [0; 512];
     let no = stream.read(&mut resp).unwrap();
+    if std::str::from_utf8(&resp[0..no]).unwrap() == "OK" {
+        debug!("Send the Total file size");
+    }
     for received in sct_rx.try_iter() {
         match received {
             ((size, index), chunk, dat) => {
@@ -158,6 +161,8 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
                     break;
                 }
                 debug!("Index [{}] - Senting to client chunk metadata", index);
+                
+                // Write and check response OK 
                 stream
                     .write_all(
                         json!({
@@ -170,20 +175,28 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
                     )
                     .unwrap();
                 stream.flush().unwrap();
+                resp = [0; 512];
                 let no = stream.read(&mut resp).unwrap();
                 if std::str::from_utf8(&resp[0..no]).unwrap() == "OK" {
                     debug!(
                         "Index [{}] - Received OK, Senting to client chunk data  of Size :- {} ",
                         index, size
                     );
-                    stream.write_all(&chunk.as_slice()).unwrap();
+                
+                   // Write and check response OK 
+                    debug!("Chunk Start 10 bytes {:?}",&chunk[0..10]);
+                    debug!("Chunk Last  10 bytes {:?}",&chunk[chunk.len()-10..chunk.len()]);
+                    stream.write_all(&chunk.as_slice()[0..size]).unwrap();
                     stream.flush().unwrap();
+                    resp = [0; 512];
                     let no = stream.read(&mut resp).unwrap();
-                    debug!(
+                    if std::str::from_utf8(&resp[0..no]).unwrap() == "OK" {
+                        debug!(
                         "Index [{}] - Response after sending chunk {}",
                         index,
                         std::str::from_utf8(&resp[0..no]).unwrap()
                     );
+                    }
                 }
                 // TODO
                 // Combine the encrypted file chunks in correct order and decrypt it using some key
@@ -262,6 +275,7 @@ pub fn write_storage(
         json!(chunklist).to_string()
     });
 
+                            use std::{time};
     let dup_meta_tx = mpsc::Sender::clone(&meta_tx);
     let node_thread = thread::spawn(move || {
         let mut t_handles: Vec<thread::JoinHandle<_>> = vec![];
@@ -269,8 +283,16 @@ pub fn write_storage(
             match recv {
                 (index, ip, chunkbuf) => {
                     let end: &String = &ip;
-                    debug!("{:?}", end.trim());
+                    debug!("Got {:?} after fetching all the files", end.trim());
+                    debug!("****** Current Thread count is [ {} ] ****** and index [ {} ]",t_handles.len(),index+1);
                     if end.trim() == String::from("End") {
+                        while index+1 != t_handles.len(){
+                            println!("Waiting in loop index [{}] , thread cnt [{}]",index+1,t_handles.len());
+                            debug!("Waiting in loop index [{}] , thread cnt [{}]",index+1,t_handles.len());
+                            let sec = time::Duration::from_secs(2);
+                            thread::sleep(sec);
+                        }
+                        debug!("****** Current Thread count is [ {} ] ******",t_handles.len());
                         for handle in t_handles {
                             handle.join().unwrap();
                         }
@@ -319,7 +341,7 @@ pub fn write_storage(
                         if std::str::from_utf8(&resp[0..no]).unwrap() == "OK" {
                             cstream.write_all(datachunk.as_slice()).unwrap();
                             cstream.flush().unwrap();
-                            //debug!("Sent Chunk");
+                            debug!("Sent Chunk of index [{}] to {:?}",index,nextserver_ip);
                         }
 
                         let dno = cstream.read(&mut resp).unwrap();
@@ -340,6 +362,7 @@ pub fn write_storage(
     let mut total = 0;
     let mut index = 0;
     let mut tempbuffer: Vec<u8> = Vec::new();
+    let mut destbuffer = [0 as u8; 2048];
     loop {
         let dno = stream.read(&mut destbuffer).unwrap();
         total += dno;
@@ -348,7 +371,7 @@ pub fn write_storage(
             debug!("{:?}", tempbuffer);
         }*/
         //if total % 65536 == 0 {
-        if total % 1048576 == 0 {
+        if total % 4046848 == 0 {
             //debug!("{}", node_array.len());
             let ip = node_array[index % node_array.len()].to_owned();
             sct_tx.send((index, ip, tempbuffer.clone())).unwrap();
@@ -360,6 +383,9 @@ pub fn write_storage(
             let ip = node_array[index % node_array.len()].to_owned();
             sct_tx.send((index, ip, tempbuffer.clone())).unwrap();
             tempbuffer.clear();
+            use std::{thread, time};
+            let sec = time::Duration::from_secs(2);
+            thread::sleep(sec);
             sct_tx
                 .send((index, String::from("End"), tempbuffer))
                 .unwrap();
@@ -398,6 +424,7 @@ pub fn write_storage(
     //debug!("{:?} - {:?}", file_uuid, chunkdata);
     let _: () = con.set(&user_uuid, filemap.to_string()).unwrap();
     let _: () = con.set(&file_uuid, chunkdata).unwrap();
+    debug!("Sending back upload complete");
 
     // TODO
     // send the details of each chunk and it's respective node to the core_server
@@ -453,7 +480,7 @@ pub fn getfromstore(
     let no = stream.read(&mut resp).unwrap();
     let fsize: Value = serde_json::from_slice(&resp[0..no]).unwrap();
     let filesize = fsize["total_size"].as_u64().unwrap() as usize;
-    if filesize > 1048576 {
+    if filesize > 4046848 {
         return String::from("OK");
     }
     stream.write_all(String::from("OK").as_bytes()).unwrap();
@@ -493,7 +520,7 @@ pub fn getfromstore(
         }
 
         totalfilesize += total;
-        if totalfilesize > 1048576 {
+        if totalfilesize > 4046848 {
             return String::from("OK");
         }
         let mut yieldcnt = 0;
@@ -641,7 +668,8 @@ pub fn kvstore_client_handler(
     method: String,
 ) {
     // TODO Fetch the address of the proxy server from the core server
-    let addr = String::from("127.0.0.1:7779");
+    //let addr = String::from("127.0.0.1:7779");
+    let addr = String::from("172.28.5.77:7779");
     match method.as_str() {
         "PUT" => {
             // TODO Fetch the proxy server address
