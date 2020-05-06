@@ -14,8 +14,7 @@ pub enum ServiceMsgType {
     // CHECKSYSTAT,
     SERVICEUPDATE,
     SERVICEINIT,
-    SERVICESTART,
-    SERVICESTOP,
+    SERVICEMANAGE,
     // CUSTOM,
 }
 

@@ -628,7 +628,7 @@ pub async fn paas_main(stream: &mut TcpStream, http_data: &http::Http, appid: St
 
     let paas_data: Vec<Value> = paasarray.as_array().unwrap().to_vec();
 
-    let server_addr = format!("{}:9090",paas_data[0][0].as_str().unwrap().split(":").collect::<Vec<&str>>()[0]);
+    let server_addr = format!("{}:7070",paas_data[0][0].as_str().unwrap().split(":").collect::<Vec<&str>>()[0]);
     let inbound = tokstream::from_std(stream.try_clone().unwrap()).unwrap();
     info!("Got Connection");
     tokio::join!(transfer(inbound, server_addr.clone(), tag));
@@ -668,8 +668,8 @@ pub fn kvstore_client_handler(
     method: String,
 ) {
     // TODO Fetch the address of the proxy server from the core server
-    //let addr = String::from("127.0.0.1:7779");
-    let addr = String::from("172.28.5.77:7779");
+    let addr = String::from("127.0.0.1:7779");
+    //let addr = String::from("172.28.5.77:7779");
     match method.as_str() {
         "PUT" => {
             // TODO Fetch the proxy server address

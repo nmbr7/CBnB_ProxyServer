@@ -32,12 +32,12 @@ fn server_api_handler(
     server_dup_tx: mpsc::Sender<String>,
     data: (String),
 ) -> () {
-    let coreserver_ip = String::from("172.28.5.1:7778");
-    //let coreserver_ip = String::from("127.0.0.1:7778");
+    //let coreserver_ip = String::from("172.28.5.1:7778");
+    let coreserver_ip = String::from("127.0.0.1:7778");
     //let coreserver_ip = String::from("192.168.43.235:7778");
 
     let proxy_server_uuid = HELLO_WORLD.to_string();
-    //info!("Received connection from [{}]", &data);
+    info!("Received connection from [{}]", &data);
 
     if data == coreserver_ip {
         let mut buffer = [0; 512];
@@ -53,7 +53,7 @@ fn server_api_handler(
         let http_content = match Http::parse(stream, 0) {
             Ok(val) => val,
             _ => {
-                //info!("[invalid request]");
+                info!("[invalid request]");
                 stream
                     .write_all(format!("HTTP/1.1 404 Not Found\r\n\r\n").as_bytes())
                     .unwrap();
@@ -91,7 +91,7 @@ fn server_api_handler(
                     "paas" => paas_main(stream, &http_content, subs[0].to_string()),
                 match subs[1]{
                     _=>{
-                //info!("[invalid request]");
+                info!("[invalid request]");
                 stream
                     .write_all(format!("HTTP/1.1 404 Not Found\r\n\r\n").as_bytes())
                     .unwrap();
@@ -101,7 +101,7 @@ fn server_api_handler(
                 }*/
             }
             _ => {
-                //info!("[invalid request]");
+                info!("[invalid request]");
                 stream
                     .write_all(format!("HTTP/1.1 404 Not Found\r\n\r\n").as_bytes())
                     .unwrap();
@@ -113,7 +113,7 @@ fn server_api_handler(
         let mut buffer = [0; 100_000];
         let no = stream.read(&mut buffer).unwrap();
         let recv_data: Message = serde_json::from_slice(&buffer[0..no]).unwrap();
-        ////info!("{}", recv_data);
+        //debug!("{:?}", recv_data);
 
         match recv_data {
             Message::Node(node) => match node.msg_type {
@@ -133,7 +133,7 @@ fn server_api_handler(
             Message::Service(service) => match service.msg_type {
                 ServiceMsgType::SERVICEINIT => match service.service_type {
                     ServiceType::Faas => {
-                        ////info!("{}", service.content);
+                        //info!("{}", service.content);
                         let faasco: Value =
                             serde_json::from_str(&service.content.as_str()).unwrap();
                         // Get uuid from the user
@@ -166,7 +166,7 @@ fn server_api_handler(
                                     .to_string(),
                             );
                         }
-                        // //info!("{:?}", node_array);
+                        // info!("{:?}", node_array);
                         let client = redis::Client::open("redis://172.28.5.3/4").unwrap();
                         let mut con = client.get_connection().unwrap();
 
@@ -409,7 +409,7 @@ fn server_api_handler(
                                                 .to_string(),
                                             )
                                             .unwrap();
-                                        json!({}).to_string()
+                                        json!({"apps":[]}).to_string()
                                     }
                                 };
                                 let mut paasmap: Value =
@@ -488,15 +488,28 @@ fn server_api_handler(
                     ServiceType::Paas => {}
                 },
 
-                ServiceMsgType::SERVICESTART => {}
-                ServiceMsgType::SERVICESTOP => {}
+                ServiceMsgType::SERVICEMANAGE => match service.service_type {
+                    //Always check the uuid of the sender 
+                    ServiceType::Storage => {}
+                    ServiceType::Faas => {}
+                    ServiceType::Paas => {
+                        let paas_manage_data: Value = serde_json::from_str(&service.content.as_str()).unwrap();
+                        debug!("{:?}", paas_manage_data);
+                        let node_ip = paas_manage_data["node_ip"].as_str().unwrap().to_string();
+                        
+                        let mut destbuffer = [0 as u8; 512];
+                        let msg =  serde_json::to_string(&service).unwrap().as_bytes().to_owned();
+                        let dno = forward_to(node_ip,&msg, &mut destbuffer, &data);
+                        respond_back(stream, &destbuffer[0..dno]);
+                    }
+                }
             },
         };
     }
 }
 pub fn try_connect(ip: String) -> Result<TcpStream, ()> {
     use std::{thread, time};
-    //info!("connecting to [{}]", &ip);
+    info!("connecting to [{}]", &ip);
     let mut cnt = 0;
     loop {
         match TcpStream::connect(&ip) {
@@ -505,11 +518,11 @@ pub fn try_connect(ip: String) -> Result<TcpStream, ()> {
                 if cnt != 5 {
                     let sec = time::Duration::from_secs(2);
                     thread::sleep(sec);
-                    //info!("Retrying");
+                    info!("Retrying");
                     cnt += 1;
                     continue;
                 } else {
-                    //info!("Drop connection attempt");
+                    info!("Drop connection attempt");
                     // TODO Handler all the return at the caller properly
                     return Err(());
                 }
@@ -519,7 +532,7 @@ pub fn try_connect(ip: String) -> Result<TcpStream, ()> {
 }
 
 pub fn forward_to(ip: String, buffer: &[u8], destbuffer: &mut [u8; 512], sip: &String) -> usize {
-    //info!("Forwarding connection to [{}]", &ip);
+    info!("Forwarding connection to [{}]", &ip);
     let mut deststream = try_connect(ip.clone()).unwrap();
     if ip.ends_with("7778") {
         deststream.write(sip.as_bytes()).unwrap();
@@ -573,7 +586,7 @@ fn read_and_forward(
 
 pub fn server_api_main(server_tx: mpsc::Sender<String>) -> () {
     let listener = TcpListener::bind("0.0.0.0:7779").unwrap();
-    //info!("Waiting for proxy connections");
+    info!("Waiting for proxy connections");
     for stream in listener.incoming() {
         let mut stream = stream.unwrap();
         let data = (stream.peer_addr().unwrap().to_string());
