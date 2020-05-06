@@ -595,7 +595,7 @@ fn read_and_forward(
 */
 
 pub fn server_api_main(server_tx: mpsc::Sender<String>) -> () {
-    let listener = TcpListener::bind("0.0.0.0:7770").unwrap();
+    let listener = TcpListener::bind("0.0.0.0:7779").unwrap();
     info!("Waiting for proxy connections");
     for stream in listener.incoming() {
         let mut stream = stream.unwrap();
