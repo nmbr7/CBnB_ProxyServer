@@ -1,10 +1,12 @@
 use super::mode;
 use chrono::{NaiveDateTime, Utc};
-use log::{debug,info};
+use dotenv::dotenv;
+use log::{debug, info};
 use redis::Commands;
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::env;
 use std::hash::{Hash, Hasher};
 use std::io::prelude::*;
 use std::io::BufReader;
@@ -32,9 +34,13 @@ fn server_api_handler(
     server_dup_tx: mpsc::Sender<String>,
     data: (String),
 ) -> () {
-    //let coreserver_ip = String::from("172.28.5.1:7778");
-    let coreserver_ip = String::from("127.0.0.1:7778");
-    //let coreserver_ip = String::from("192.168.43.235:7778");
+    dotenv().ok();
+    let run_mode = env::var("RUN_MODE").expect("RUN_MODE not set");
+    let coreserver_ip = match run_mode.as_str() {
+        "TEST" => String::from("172.28.5.1:7778"),
+        "DEV" => String::from("127.0.0.1:7778"),
+        _ => panic!("Run mode not set"),
+    };
 
     let proxy_server_uuid = HELLO_WORLD.to_string();
     info!("Received connection from [{}]", &data);
@@ -489,20 +495,24 @@ fn server_api_handler(
                 },
 
                 ServiceMsgType::SERVICEMANAGE => match service.service_type {
-                    //Always check the uuid of the sender 
+                    //Always check the uuid of the sender
                     ServiceType::Storage => {}
                     ServiceType::Faas => {}
                     ServiceType::Paas => {
-                        let paas_manage_data: Value = serde_json::from_str(&service.content.as_str()).unwrap();
+                        let paas_manage_data: Value =
+                            serde_json::from_str(&service.content.as_str()).unwrap();
                         debug!("{:?}", paas_manage_data);
                         let node_ip = paas_manage_data["node_ip"].as_str().unwrap().to_string();
-                        
+
                         let mut destbuffer = [0 as u8; 512];
-                        let msg =  serde_json::to_string(&service).unwrap().as_bytes().to_owned();
-                        let dno = forward_to(node_ip,&msg, &mut destbuffer, &data);
+                        let msg = serde_json::to_string(&service)
+                            .unwrap()
+                            .as_bytes()
+                            .to_owned();
+                        let dno = forward_to(node_ip, &msg, &mut destbuffer, &data);
                         respond_back(stream, &destbuffer[0..dno]);
                     }
-                }
+                },
             },
         };
     }
@@ -585,7 +595,7 @@ fn read_and_forward(
 */
 
 pub fn server_api_main(server_tx: mpsc::Sender<String>) -> () {
-    let listener = TcpListener::bind("0.0.0.0:7779").unwrap();
+    let listener = TcpListener::bind("0.0.0.0:7770").unwrap();
     info!("Waiting for proxy connections");
     for stream in listener.incoming() {
         let mut stream = stream.unwrap();

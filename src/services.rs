@@ -1,9 +1,11 @@
 use crate::api::{forward_to, respond_back, try_connect};
 use crate::message::{Message, ServiceMessage, ServiceMsgType, ServiceType};
+use dotenv::dotenv;
 use log::{debug, info};
 use redis::Commands;
 use serde_json::{json, Result, Value};
 use std::collections::HashMap;
+use std::env;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::net::TcpStream;
@@ -15,7 +17,6 @@ use uuid::Uuid;
 // Async related
 use futures::future::try_join;
 use futures::FutureExt;
-use std::env;
 use std::error::Error;
 use tokio::io as tio;
 use tokio::net::TcpStream as tokstream;
@@ -161,8 +162,8 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
                     break;
                 }
                 debug!("Index [{}] - Senting to client chunk metadata", index);
-                
-                // Write and check response OK 
+
+                // Write and check response OK
                 stream
                     .write_all(
                         json!({
@@ -182,20 +183,20 @@ pub fn read_storage(stream: &mut TcpStream, msg: Value) {
                         "Index [{}] - Received OK, Senting to client chunk data  of Size :- {} ",
                         index, size
                     );
-                
-                   // Write and check response OK 
-                    debug!("Chunk Start 10 bytes {:?}",&chunk[0..10]);
-                    debug!("Chunk Last  10 bytes {:?}",&chunk[chunk.len()-10..chunk.len()]);
+
+                    // Write and check response OK
+                    // debug!("Chunk Start 10 bytes {:?}",&chunk[0..10]);
+                    // debug!("Chunk Last  10 bytes {:?}",&chunk[chunk.len()-10..chunk.len()]);
                     stream.write_all(&chunk.as_slice()[0..size]).unwrap();
                     stream.flush().unwrap();
                     resp = [0; 512];
                     let no = stream.read(&mut resp).unwrap();
                     if std::str::from_utf8(&resp[0..no]).unwrap() == "OK" {
                         debug!(
-                        "Index [{}] - Response after sending chunk {}",
-                        index,
-                        std::str::from_utf8(&resp[0..no]).unwrap()
-                    );
+                            "Index [{}] - Response after sending chunk {}",
+                            index,
+                            std::str::from_utf8(&resp[0..no]).unwrap()
+                        );
                     }
                 }
                 // TODO
@@ -275,7 +276,7 @@ pub fn write_storage(
         json!(chunklist).to_string()
     });
 
-                            use std::{time};
+    use std::time;
     let dup_meta_tx = mpsc::Sender::clone(&meta_tx);
     let node_thread = thread::spawn(move || {
         let mut t_handles: Vec<thread::JoinHandle<_>> = vec![];
@@ -284,15 +285,30 @@ pub fn write_storage(
                 (index, ip, chunkbuf) => {
                     let end: &String = &ip;
                     debug!("Got {:?} after fetching all the files", end.trim());
-                    debug!("****** Current Thread count is [ {} ] ****** and index [ {} ]",t_handles.len(),index+1);
+                    debug!(
+                        "****** Current Thread count is [ {} ] ****** and index [ {} ]",
+                        t_handles.len(),
+                        index + 1
+                    );
                     if end.trim() == String::from("End") {
-                        while index+1 != t_handles.len(){
-                            println!("Waiting in loop index [{}] , thread cnt [{}]",index+1,t_handles.len());
-                            debug!("Waiting in loop index [{}] , thread cnt [{}]",index+1,t_handles.len());
+                        while index + 1 != t_handles.len() {
+                            println!(
+                                "Waiting in loop index [{}] , thread cnt [{}]",
+                                index + 1,
+                                t_handles.len()
+                            );
+                            debug!(
+                                "Waiting in loop index [{}] , thread cnt [{}]",
+                                index + 1,
+                                t_handles.len()
+                            );
                             let sec = time::Duration::from_secs(2);
                             thread::sleep(sec);
                         }
-                        debug!("****** Current Thread count is [ {} ] ******",t_handles.len());
+                        debug!(
+                            "****** Current Thread count is [ {} ] ******",
+                            t_handles.len()
+                        );
                         for handle in t_handles {
                             handle.join().unwrap();
                         }
@@ -341,7 +357,7 @@ pub fn write_storage(
                         if std::str::from_utf8(&resp[0..no]).unwrap() == "OK" {
                             cstream.write_all(datachunk.as_slice()).unwrap();
                             cstream.flush().unwrap();
-                            debug!("Sent Chunk of index [{}] to {:?}",index,nextserver_ip);
+                            debug!("Sent Chunk of index [{}] to {:?}", index, nextserver_ip);
                         }
 
                         let dno = cstream.read(&mut resp).unwrap();
@@ -475,18 +491,19 @@ pub fn getfromstore(
     debug!("{:?}", msg_data);
     stream.write_all(msg_data.as_bytes()).unwrap();
     stream.flush().unwrap();
-    // TODO Handle the trailing character error
 
     let no = stream.read(&mut resp).unwrap();
+
     let fsize: Value = serde_json::from_slice(&resp[0..no]).unwrap();
     let filesize = fsize["total_size"].as_u64().unwrap() as usize;
-    if filesize > 4046848 {
-        return String::from("OK");
-    }
+    /*if filesize > 4046848 {
+        return String::from("errooo");
+    }*/
     stream.write_all(String::from("OK").as_bytes()).unwrap();
     stream.flush().unwrap();
-    let mut bufvec: Vec<Vec<u8>> = Vec::with_capacity(filesize / 65536);
 
+    // For storing the file chunks to a vec
+    let mut bufvec: Vec<Vec<u8>> = Vec::with_capacity(filesize / 4046848);
     let mut totalfilesize = 0 as usize;
     loop {
         let no = stream.read(&mut resp).unwrap();
@@ -503,29 +520,29 @@ pub fn getfromstore(
         let index = metadata["index"].as_u64().unwrap();
         let mut total = 0 as usize;
         //let mut bufvec: Vec<u8> = vec![];
+        let mut destbuffer: Vec<u8> = vec![];
         loop {
-            let mut dno = stream.read(&mut destbuffer).unwrap();
-            if dno > size {
-                dno = size;
+            //let mut dno = stream.read(&mut destbuffer).unwrap();
+            for byte in stream.try_clone().unwrap().bytes() {
+                total += 1;
+                destbuffer.push(byte.unwrap());
+                if total >= size {
+                    break;
+                }
             }
-            total += dno;
-            //println!("{:?}",destbuffer[(dno-15)..dno].to_vec());
-            bufvec.insert(index as usize, destbuffer[0..dno].to_vec());
-            println!("Total: {} - dno: {} - Size {}", total, dno, size);
+            bufvec.insert(index as usize, destbuffer[0..total].to_vec());
+            debug!("Total: {} - Size {}", total, size);
             if total >= size {
                 stream.write_all(String::from("OK").as_bytes()).unwrap();
                 stream.flush().unwrap();
                 break;
             }
         }
-
         totalfilesize += total;
-        if totalfilesize > 4046848 {
-            return String::from("OK");
-        }
         let mut yieldcnt = 0;
         let mut id = 0;
         for i in bufvec.clone() {
+            debug!("{}", id);
             if i.is_empty() && yieldcnt > id {
                 id += 1;
                 continue;
@@ -545,7 +562,7 @@ pub fn getfromstore(
             }
             id += 1;
         }
-        if totalfilesize == filesize {
+        if totalfilesize >= filesize {
             break;
         }
     }
@@ -565,6 +582,8 @@ pub fn uploadtostore(stream: &mut TcpStream, data: String, addr: String) -> Stri
         key = k;
         buf = v;
     }
+
+    // TODO Implement the accesibility of the key and the object
     let content = json!({
         "id"       : recv_data["id"],
         "msg_type" :  "write",
@@ -606,7 +625,7 @@ pub async fn paas_main(stream: &mut TcpStream, http_data: &http::Http, appid: St
     //let app_uuid = path[1];
     // TODO Lookup the node related to the app_uuid from the proxy server or from the cache;
     let tag = appid.to_string();
-    
+
     let client = redis::Client::open("redis://172.28.5.3/9").unwrap();
     let mut con = client.get_connection().unwrap();
     let nodedata: String = con.get(&tag).unwrap();
@@ -624,11 +643,16 @@ pub async fn paas_main(stream: &mut TcpStream, http_data: &http::Http, appid: St
     debug!("{:?}", paasjson);
     let mut paasarray: Value = serde_json::from_str(&paasjson.as_str()).unwrap();
 
-
-
     let paas_data: Vec<Value> = paasarray.as_array().unwrap().to_vec();
 
-    let server_addr = format!("{}:7070",paas_data[0][0].as_str().unwrap().split(":").collect::<Vec<&str>>()[0]);
+    let server_addr = format!(
+        "{}:7070",
+        paas_data[0][0]
+            .as_str()
+            .unwrap()
+            .split(":")
+            .collect::<Vec<&str>>()[0]
+    );
     let inbound = tokstream::from_std(stream.try_clone().unwrap()).unwrap();
     info!("Got Connection");
     tokio::join!(transfer(inbound, server_addr.clone(), tag));
@@ -667,9 +691,14 @@ pub fn kvstore_client_handler(
     path: Vec<&str>,
     method: String,
 ) {
+    dotenv().ok();
+    let run_mode = env::var("RUN_MODE").expect("RUN_MODE not set");
     // TODO Fetch the address of the proxy server from the core server
-    let addr = String::from("127.0.0.1:7779");
-    //let addr = String::from("172.28.5.77:7779");
+    let addr = match run_mode.as_str() {
+        "TEST" => String::from("172.28.5.77:7779"),
+        "DEV" => String::from("127.0.0.1:7779"),
+        _ => panic!("Run mode not set"),
+    };
     match method.as_str() {
         "PUT" => {
             // TODO Fetch the proxy server address

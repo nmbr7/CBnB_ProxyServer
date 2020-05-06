@@ -40,9 +40,12 @@ fn main() -> () {
         .to_string(),
     });
 
-    //let coreserver_ip = String::from("192.168.43.235:7778");
-    let coreserver_ip = String::from("127.0.0.1:7778");
-    //let coreserver_ip = String::from("172.28.5.1:7778");
+    let run_mode = env::var("RUN_MODE").expect("RUN_MODE not set");
+    let coreserver_ip = match run_mode.as_str() {
+        "TEST" => String::from("172.28.5.1:7778"),
+        "DEV" => String::from("127.0.0.1:7778"),
+        _ => panic!("Run mode not set"),
+    };
     let msg = serde_json::to_string(&reg_data).unwrap();
     loop {
         let dno = forward_to(
