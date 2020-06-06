@@ -721,9 +721,9 @@ pub fn kvstore_client_handler(
 }
 
 // FaaS Related Functions
-
 pub mod http {
     use super::*;
+    #[derive(Debug)]
     pub struct Http {
         pub method: String,
         pub path: String,
@@ -852,6 +852,36 @@ pub fn faas_client_handler(stream: &mut TcpStream, data: String) {
     //TODO Check the response and send it to the user
     respond_back(stream, resp_data[0].as_bytes());
 }
+
+pub fn web_api_handle(stream: &mut TcpStream, data: String, path: Vec<&str>, method: String) {
+    match path[0] {
+        "login" => {
+            // TODO send user registration message to the coreserver
+            stream
+                .write_all(format!("HTTP/1.1 200 OK\r\n\r\n").as_bytes())
+                .unwrap();
+            stream.flush();
+        }
+        "register" => {
+            // TODO send user registration message to the coreserver
+            stream
+                .write_all(format!("HTTP/1.1 200 OK\r\n\r\n").as_bytes())
+                .unwrap();
+            stream.flush();
+        }
+        "getkey"   => {
+            // TODO Get the key from the coreserver
+            let uuid_key = Uuid::new_v4().to_string();
+            stream
+                .write_all(format!("HTTP/1.1 200 OK\r\n\r\n{}\r\n",uuid_key).as_bytes())
+                .unwrap();
+            stream.flush();
+
+        }
+        _ => {}
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

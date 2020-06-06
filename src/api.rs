@@ -23,7 +23,7 @@ use crate::message::{
 use crate::services::http::Http;
 
 use crate::services::{
-    faas_client_handler, kvstore_client_handler, paas_main, query_storage, read_storage,
+    web_api_handle,  faas_client_handler, kvstore_client_handler, paas_main, query_storage, read_storage,
     write_storage,
 };
 
@@ -67,15 +67,22 @@ fn server_api_handler(
                 return;
             }
         };
+        println!("{:?}",http_content);
         let data = http_content.body.clone();
         let method = http_content.method.clone();
-        let host = http_content.header["Host"].clone();
+        let mut host = String::new();
+        host = if http_content.header.contains_key("Host"){
+            http_content.header["Host"].clone()
+        }
+        else{
+            http_content.header["host"].clone()
+        };
         let mut path = http_content.path.split("/").collect::<Vec<&str>>();
         path.remove(0);
-        /*info!(
+        info!(
             "\nMethod: {}\nHost: {}\nPath: {:?}\nBody: {}",
             method, host, path, data
-        );*/
+        );
         // http routing based on the host name
         match host.as_str().trim_end_matches(".cbnb.com") {
             "faas" => match path[0] {
@@ -89,6 +96,10 @@ fn server_api_handler(
             "kv" => {
                 Http::parse(stream, 1).unwrap();
                 kvstore_client_handler(stream, data, path, method);
+            }
+            "api" => {
+                Http::parse(stream, 1).unwrap();
+                web_api_handle(stream, data, path, method);
             }
             subdomain => {
                 paas_main(stream, &http_content, subdomain.to_string());
@@ -352,19 +363,6 @@ fn server_api_handler(
                                 // TODO Currently the fileid is same as the userid
                                 // TODO the storage function needs to implement a wrapper
                                 // TODO to hide the real uid and only give access to cloud apps storage
-                                let paasdata = ServiceMessage {
-                                    uuid: proxy_server_uuid.clone(),
-                                    msg_type: ServiceMsgType::SERVICEINIT,
-                                    service_type: ServiceType::Paas,
-                                    content: json!({
-                                    "msg_type": "deploy",
-                                    "runtime": msg["runtime"],
-                                    "filename": filename,
-                                    "fileid": service.uuid,
-                                    "tag":apphash,
-                                    })
-                                    .to_string(),
-                                };
                                 let no = stream.read(&mut destbuffer).unwrap();
                                 let mut status: Value =
                                     serde_json::from_slice(&destbuffer[0..no]).unwrap();
@@ -380,6 +378,21 @@ fn server_api_handler(
                                         return;
                                     }
                                 }
+
+
+                                let paasdata = ServiceMessage {
+                                    uuid: proxy_server_uuid.clone(),
+                                    msg_type: ServiceMsgType::SERVICEINIT,
+                                    service_type: ServiceType::Paas,
+                                    content: json!({
+                                    "msg_type": "deploy",
+                                    "runtime": msg["runtime"],
+                                    "filename": filename,
+                                    "fileid": service.uuid,
+                                    "tag":apphash,
+                                    })
+                                    .to_string(),
+                                };
 
                                 let node_msg = serde_json::to_string(&paasdata).unwrap();
                                 let mut cnt = 0;
@@ -418,12 +431,13 @@ fn server_api_handler(
                                         json!({"apps":[]}).to_string()
                                     }
                                 };
+
+                                // Adding the new apphash to the apphash array
                                 let mut paasmap: Value =
                                     serde_json::from_str(&paasdata.as_str()).unwrap();
-
                                 let apps = paasmap["apps"].as_array().unwrap();
                                 let mut appids: Vec<String> = Vec::new();
-                                println!("{}", apps.len());
+                                debug!("{}", apps.len());
                                 if apps.len() != 0 {
                                     for i in apps {
                                         appids.push(i.as_str().unwrap().to_string());
@@ -431,15 +445,64 @@ fn server_api_handler(
                                 }
                                 appids.push(apphash.clone());
                                 paasmap["apps"] = json!(appids);
+                                // ------------------------------------------
+
                                 // Wait for the acknowledgement from the app file upload from the user
                                 let _: () = con.set(&apphash, json!(nodedata).to_string()).unwrap();
                                 let _: () = con.set(&user_uuid, paasmap.to_string()).unwrap();
                                 respond_back(
                                     stream,
-                                    format!("App deployed at {}.cbnb.com", apphash).as_bytes(),
+                                    format!("Deployment details\nAppid : {}\nApp will be available at {}.cbnb.com:7779\nDeployment may take few minutes, you can check the status of the app using `cbnbcli paas status` subcommand ",apphash,apphash).as_bytes(),
                                 );
                                 // TODO Forward some message to the node to report the file upload
                                 // TODO or only send to the node if the upload failed
+                            }
+                            "status" => {
+                                let tag = msg["appid"].as_str().unwrap().to_string();
+                                let client = redis::Client::open("redis://172.28.5.3/9").unwrap();
+                                let mut con = client.get_connection().unwrap();
+                                let nodedata: String = con.get(&tag).unwrap();
+
+                                let paasjson: String = match con.get(&tag) {
+                                    Ok(val) => val,
+                                    _ => {
+                                        respond_back(stream,format!("No apps yet").as_bytes());
+                                        return;
+                                    }
+                                };
+                                let mut paasarray: Value = serde_json::from_str(&paasjson.as_str()).unwrap();
+                                let paas_data: Vec<Value> = paasarray.as_array().unwrap().to_vec();
+                                let server_addr = format!(
+                                    "{}:7777",
+                                    paas_data[0][0]
+                                        .as_str()
+                                        .unwrap()
+                                        .split(":")
+                                        .collect::<Vec<&str>>()[0]
+                                );
+
+                                let paasdata = ServiceMessage {
+                                    uuid: proxy_server_uuid.clone(),
+                                    msg_type: ServiceMsgType::SERVICEINIT,
+                                    service_type: ServiceType::Paas,
+                                    content: json!({
+                                            "msg_type":"status",
+                                            "tag":tag,
+                                        })
+                                        .to_string()
+                                };
+
+                                let node_msg = serde_json::to_string(&paasdata).unwrap();
+                                let mut destbuffer = [0; 512];
+                                let dno = forward_to(
+                                    server_addr.to_string(),
+                                    node_msg.as_bytes(),
+                                    &mut destbuffer,
+                                    &data,
+                                );
+                                respond_back(stream,&destbuffer[0..dno]);
+                                
+
                             }
                             _ => {}
                         }
